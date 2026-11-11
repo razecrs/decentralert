@@ -13,6 +13,9 @@ The development API is intentionally small and typed by `backend/src/models.rs` 
 | `POST` | `/v1/sos/sessions/{id}/heartbeat` | Refresh liveness and optional location or battery context. |
 | `POST` | `/v1/sos/sessions/{id}/confirm` | Confirm a session and create one private simulated incident. |
 | `POST` | `/v1/sos/sessions/{id}/cancel` | Cancel a session and remove its sensitive snapshot. |
+| `GET` | `/v1/network` | Read the authenticated username, incoming invites, connections, and in-app alerts. |
+| `POST` | `/v1/network/invites` | Invite another Decentralert username. |
+| `POST` | `/v1/network/invites/{id}/accept` | Accept an invite addressed to the authenticated device. |
 | `GET` | `/v1/incidents` | Latest 200 incidents. |
 | `POST` | `/v1/incidents` | Create and fan out an idempotent incident. |
 | `GET` | `/v1/incidents/{id}` | Read one incident. |
@@ -31,4 +34,6 @@ Vault and SOS session routes require the `X-Device-Id` header and an `Authorizat
 An `unknown` or `multi_service` incident fans out to police, fire, medical, and rescue adapters. A specific category fans out only to that service. Each adapter acknowledgement has its own status and reference.
 
 Device-originated incidents are marked private. Unauthenticated incident list and detail responses retain operational status and Circle-notification counts but redact the profile, evidence, and sensor context.
+
+In-app SOS alerts are created only for a username connection with a server-recorded accepted invite. The recipient must authenticate as the connected device to read the alert. The Android prototype polls this inbox every two seconds while it is open. It does not claim background push delivery.
 

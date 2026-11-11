@@ -15,11 +15,12 @@ The APK uses Android's standard debug signature. It is installable for evaluatio
 
 ## 2. Create a test Emergency Vault
 
-1. Open **Profile** and enter fictional test data. Do not use real health information in this prototype.
-2. Open **People**, add a fictional trusted contact, and mark it confirmed for the demo.
-3. Select **Save and sync** on each screen.
+1. Create a test display name and unique Decentralert username on the setup screen.
+2. Open **Profile** and enter fictional test data. Do not use real health information in this prototype.
+3. On a second device, create another username. In **People**, add that username and send an invite.
+4. Accept the invite on the second device, then save the sender's Emergency Circle.
 
-The authenticated server copy lets the prototype preserve the context needed for an SOS handoff. Calls, SMS, push notifications, and contact invitations remain simulated.
+The authenticated server copy lets the prototype preserve the context needed for an SOS handoff. Username invites, acceptance, and in-app SOS delivery are live. Calls, SMS, push notifications, and authority dispatch remain simulated.
 
 ## 3. Try the SOS safety window
 
@@ -27,7 +28,7 @@ The authenticated server copy lets the prototype preserve the context needed for
 2. Grant location permission and observe the visible 30-second confirmation.
 3. Use **Cancel** to safely remove the pending handoff, or use **Send now** to confirm it immediately.
 
-The Android prototype creates an authenticated pre-alert on the deployed simulation API and sends heartbeats during the confirmation window. A confirmed session appears in the operator console with its private health fields redacted from the public incident endpoint.
+The Android prototype creates an authenticated pre-alert on the deployed simulation API and sends heartbeats during the confirmation window. A confirmed session appears in the accepted contact's app within the polling interval and in the operator console with its private health fields redacted from the public incident endpoint.
 
 ## 4. Open the operator demo
 
@@ -41,6 +42,7 @@ The Android prototype creates an authenticated pre-alert on the deployed simulat
 - Authenticated device registration and Emergency Vault synchronization
 - Durable SOS pre-alerts, client heartbeats, and optional offline escalation
 - Emergency Circle notification attempt records
+- Username invites, recipient acceptance, and authenticated in-app SOS inbox delivery
 - Deterministic Kotlin countdown and cancellation logic
 - Rust API with idempotent incident creation
 - PostgreSQL and PostGIS persistence
@@ -51,7 +53,7 @@ The Android prototype creates an authenticated pre-alert on the deployed simulat
 ## What remains simulated
 
 - Emergency-service integrations
-- Calls, SMS, push notifications, and contact invitations
+- Calls, SMS, and push notifications
 - 112 and NL-Alert connectivity
 - Production identity and responder verification
 - End-to-end encrypted server vault fields and production device attestation

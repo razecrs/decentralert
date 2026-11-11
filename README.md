@@ -33,6 +33,7 @@ The prototype includes:
 
 - An Android Emergency Vault for medical context, accessibility needs, and consent controls
 - An Emergency Circle with accepted trusted contacts and simulated call, SMS, and push attempts
+- Username-based Decentralert invites with recipient acceptance and authenticated in-app SOS delivery
 - An authenticated SOS pre-alert with Cancel, Send now, and heartbeat-loss escalation
 - A Kotlin Multiplatform incident model and deterministic countdown state machine
 - A Rust and Axum API with idempotent incident creation and service fan-out simulation
@@ -52,7 +53,7 @@ Requirements:
 
 - Android 8.0 or newer
 - Permission to install apps from your browser or file manager
-- No account required
+- No email address or password required for the prototype device session
 
 See the [judge guide](docs/JUDGES.md) for the two-minute walkthrough.
 
@@ -66,6 +67,10 @@ The deployed simulation is available at [decentralert.razecrs.com](https://decen
 | --- | --- |
 | <img src="docs/assets/sos-action.png" alt="Android SOS screen" /> | <img src="docs/assets/confirmation.png" alt="Android confirmation countdown" /> |
 
+| Accepted Decentralert connections | Live alert on a second Android device |
+| --- | --- |
+| <img src="docs/assets/network-connections.png" alt="Two accepted Decentralert username connections" /> | <img src="docs/assets/live-alert.png" alt="Authenticated medical SOS received on a trusted contact device" /> |
+
 <p align="center">
   <img src="docs/assets/dispatch-console.png" alt="Decentralert dispatch console" width="100%" />
 </p>
@@ -77,7 +82,8 @@ The city routing image is concept art. The Android and operator-console screens 
 ```mermaid
 flowchart LR
     A[Android Emergency Vault] -->|Authenticated pre-alert and heartbeats| B[Rust API]
-    B --> J[Simulated Emergency Circle notifications]
+    B --> J[Authenticated in-app Emergency Circle alerts]
+    B --> K[Simulated calls, SMS, and push]
     B --> C[(PostgreSQL and PostGIS)]
     B --> D[Police simulator]
     B --> E[Fire simulator]
@@ -87,7 +93,7 @@ flowchart LR
     C --> I[Kotlin/Wasm operator console]
 ```
 
-The repository is intentionally structured around replaceable service adapters. Current adapters and contact notifications are simulators. Android protects its local vault and device token with an app-specific Android Keystore key, but the prototype server does not provide end-to-end encrypted vault fields. A production deployment would require authority-provided endpoints, hardware-backed key policy, end-to-end encrypted vault fields, audited authentication, retention controls, clinical-safety review, and a DPIA.
+The repository is intentionally structured around replaceable service adapters. Authority adapters, calls, SMS, and push notifications are simulators. Authenticated Decentralert-to-Decentralert inbox delivery is live while both apps are online. Android protects its local vault and device token with an app-specific Android Keystore key, but the prototype server does not provide end-to-end encrypted vault fields. A production deployment would require authority-provided endpoints, hardware-backed key policy, end-to-end encrypted vault fields, audited authentication, retention controls, clinical-safety review, and a DPIA.
 
 ## Repository layout
 

@@ -40,6 +40,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/sos/sessions/{id}/confirm", post(confirm_sos_session))
         .route("/v1/sos/sessions/{id}/cancel", post(cancel_sos_session))
+        .route("/v1/network", get(get_network))
+        .route("/v1/network/invites", post(create_network_invite))
+        .route(
+            "/v1/network/invites/{id}/accept",
+            post(accept_network_invite),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -179,15 +185,29 @@ async fn dispatch_incident(
 
 async fn register_device(
     State(state): State<AppState>,
-    Json(_request): Json<DeviceRegistrationRequest>,
+    Json(request): Json<DeviceRegistrationRequest>,
 ) -> Result<(StatusCode, Json<DeviceRegistration>), ApiError> {
     let now = Utc::now();
     let device_id = Uuid::new_v4();
+    let username = request
+        .username
+        .map(|value| normalize_username(&value))
+        .transpose()?
+        .unwrap_or_else(|| format!("user-{}", &device_id.simple().to_string()[..8]));
+    if state
+        .repository
+        .device_by_username(&username)
+        .await?
+        .is_some()
+    {
+        return Err(ApiError::Conflict("username is already taken".into()));
+    }
     let device_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     state
         .repository
         .register_device(DeviceRecord {
             id: device_id,
+            username: username.clone(),
             token_hash: hash_token(&device_token),
             created_at: now,
             last_seen_at: now,
@@ -198,8 +218,109 @@ async fn register_device(
         Json(DeviceRegistration {
             device_id,
             device_token,
+            username,
         }),
     ))
+}
+
+fn normalize_username(value: &str) -> Result<String, ApiError> {
+    let username = value.trim().to_ascii_lowercase();
+    if !(3..=24).contains(&username.len())
+        || !username.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
+    {
+        return Err(ApiError::BadRequest(
+            "username must be 3 to 24 lowercase letters, numbers, or underscores".into(),
+        ));
+    }
+    Ok(username)
+}
+
+async fn get_network(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DecentralertNetwork>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    let device = state
+        .repository
+        .device(device_id)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    Ok(Json(DecentralertNetwork {
+        username: device.username,
+        incoming_invites: state.repository.incoming_invites(device_id).await?,
+        connections: state.repository.connections(device_id).await?,
+        alerts: state.repository.alerts(device_id).await?,
+    }))
+}
+
+async fn create_network_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateNetworkInviteRequest>,
+) -> Result<(StatusCode, Json<NetworkInvite>), ApiError> {
+    let from_device_id = authorize_device(&state, &headers).await?;
+    let from_device = state
+        .repository
+        .device(from_device_id)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    let username = normalize_username(&request.username)?;
+    let recipient = state
+        .repository
+        .device_by_username(&username)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if recipient.id == from_device_id {
+        return Err(ApiError::BadRequest(
+            "you cannot add your own username".into(),
+        ));
+    }
+    if state
+        .repository
+        .accepted_connection(from_device_id, recipient.id)
+        .await?
+    {
+        return Err(ApiError::Conflict("users are already connected".into()));
+    }
+    let now = Utc::now();
+    let invite = NetworkInvite {
+        id: Uuid::new_v4(),
+        from_device_id,
+        to_device_id: recipient.id,
+        from_username: from_device.username,
+        to_username: recipient.username,
+        status: NetworkInviteStatus::Pending,
+        created_at: now,
+        updated_at: now,
+    };
+    Ok((
+        StatusCode::CREATED,
+        Json(state.repository.insert_invite(invite).await?),
+    ))
+}
+
+async fn accept_network_invite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<NetworkInvite>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    let mut invite = state
+        .repository
+        .network_invite(id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if invite.to_device_id != device_id {
+        return Err(ApiError::Unauthorized);
+    }
+    if invite.status != NetworkInviteStatus::Pending {
+        return Err(ApiError::Conflict("invite is already resolved".into()));
+    }
+    invite.status = NetworkInviteStatus::Accepted;
+    invite.updated_at = Utc::now();
+    Ok(Json(state.repository.update_invite(invite).await?))
 }
 
 async fn get_vault(
@@ -358,22 +479,60 @@ async fn escalate_sos_session(
         .clone()
         .ok_or_else(|| ApiError::Conflict("SOS vault snapshot is unavailable".into()))?;
     let should_notify = vault.escalation.notify_circle_on_confirm || offline;
-    session.notification_attempts = if should_notify {
-        vault
-            .circle
-            .iter()
-            .filter(|member| member.accepted)
-            .map(|member| CircleNotificationAttempt {
-                member_id: member.id,
-                member_name: member.name.clone(),
-                channels: member.channels.clone(),
-                status: "simulated_notified".into(),
-                attempted_at: Utc::now(),
-            })
-            .collect()
-    } else {
-        vec![]
-    };
+    let mut app_recipients = vec![];
+    session.notification_attempts = vec![];
+    if should_notify {
+        for member in &vault.circle {
+            if member.accepted {
+                session
+                    .notification_attempts
+                    .push(CircleNotificationAttempt {
+                        member_id: member.id,
+                        member_name: member.name.clone(),
+                        channels: member.channels.clone(),
+                        status: "simulated_notified".into(),
+                        attempted_at: Utc::now(),
+                    });
+            }
+            let Some(username) = member.decentralert_username.as_deref() else {
+                continue;
+            };
+            let Ok(username) = normalize_username(username) else {
+                continue;
+            };
+            let Some(recipient) = state.repository.device_by_username(&username).await? else {
+                continue;
+            };
+            if !state
+                .repository
+                .accepted_connection(session.device_id, recipient.id)
+                .await?
+            {
+                continue;
+            }
+            app_recipients.push(recipient);
+            if let Some(attempt) = session
+                .notification_attempts
+                .iter_mut()
+                .find(|attempt| attempt.member_id == member.id)
+            {
+                if !attempt.channels.contains(&NotificationChannel::InApp) {
+                    attempt.channels.push(NotificationChannel::InApp);
+                }
+                attempt.status = "decentralert_delivered".into();
+            } else {
+                session
+                    .notification_attempts
+                    .push(CircleNotificationAttempt {
+                        member_id: member.id,
+                        member_name: member.name.clone(),
+                        channels: vec![NotificationChannel::InApp],
+                        status: "decentralert_delivered".into(),
+                        attempted_at: Utc::now(),
+                    });
+            }
+        }
+    }
     let profile = if vault.consent.share_medical_profile {
         vault.profile.clone()
     } else {
@@ -387,7 +546,7 @@ async fn escalate_sos_session(
         category: session.category,
         location: session.location.clone(),
         description: session.description.clone(),
-        profile,
+        profile: profile.clone(),
         evidence: vec![],
         sensor_context: session.sensor_context.clone(),
     };
@@ -400,6 +559,31 @@ async fn escalate_sos_session(
         offline,
     )
     .await?;
+    if !app_recipients.is_empty() {
+        let sender = state
+            .repository
+            .device(session.device_id)
+            .await?
+            .ok_or(ApiError::Unauthorized)?;
+        for recipient in app_recipients {
+            state
+                .repository
+                .insert_alert(InAppAlert {
+                    id: Uuid::new_v4(),
+                    recipient_device_id: recipient.id,
+                    source_session_id: session.id,
+                    incident_id: incident.id,
+                    sender_username: sender.username.clone(),
+                    sender_display_name: profile.display_name.clone(),
+                    category: session.category,
+                    location: session.location.clone(),
+                    profile: profile.clone(),
+                    offline_escalation: offline,
+                    created_at: Utc::now(),
+                })
+                .await?;
+        }
+    }
     session.incident_id = Some(incident.id);
     session.status = if offline {
         SosSessionStatus::EscalatedOffline
@@ -633,6 +817,28 @@ mod tests {
         serde_json::json!({ "idempotencyKey": key, "category": "unknown", "location": { "latitude": 52.3728, "longitude": 4.8936, "accuracyMeters": 7.0 }, "description": "Person unresponsive", "profile": { "displayName": "Demo User", "allergies": ["penicillin"], "medications": [], "conditions": [], "accessibilityNeeds": [], "emergencyContacts": [] }, "evidence": [] }).to_string()
     }
 
+    async fn register_test_user(
+        router: &axum::Router,
+        username: &str,
+    ) -> crate::models::DeviceRegistration {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/devices/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "deviceName": "test", "username": username })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     #[tokio::test]
     async fn unknown_incident_fans_out_and_is_idempotent() {
         let state = AppState::development(Arc::new(MemoryRepository::seeded()));
@@ -775,5 +981,108 @@ mod tests {
         let incident: crate::models::Incident = serde_json::from_slice(&body).unwrap();
         assert_eq!(incident.profile.display_name, "Protected citizen");
         assert_eq!(incident.emergency_circle_notified, 1);
+    }
+
+    #[tokio::test]
+    async fn accepted_username_connection_receives_live_sos() {
+        let router = app(AppState::development(Arc::new(MemoryRepository::seeded())));
+        let sender = register_test_user(&router, "sender_demo").await;
+        let receiver = register_test_user(&router, "judge_demo").await;
+        let sender_auth = format!("Bearer {}", sender.device_token);
+        let receiver_auth = format!("Bearer {}", receiver.device_token);
+
+        let invite = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/network/invites")
+                    .header("content-type", "application/json")
+                    .header("x-device-id", sender.device_id.to_string())
+                    .header("authorization", sender_auth.clone())
+                    .body(Body::from(r#"{"username":"judge_demo"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(invite.into_body(), usize::MAX).await.unwrap();
+        let invite: crate::models::NetworkInvite = serde_json::from_slice(&body).unwrap();
+        let accepted = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/network/invites/{}/accept", invite.id))
+                    .header("content-type", "application/json")
+                    .header("x-device-id", receiver.device_id.to_string())
+                    .header("authorization", receiver_auth.clone())
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::OK);
+
+        let vault = serde_json::json!({
+            "profile": { "displayName": "Sender Test", "conditions": ["test condition"] },
+            "circle": [{ "id": Uuid::new_v4(), "name": "Judge", "phone": "+31000000000", "decentralertUsername": "judge_demo", "channels": ["call"], "accepted": false, "priority": 1 }],
+            "consent": { "sharePreciseLocation": true, "shareMedicalProfile": true, "consentedSnapshots": false, "consentedAudio": false, "consentVersion": "test" },
+            "escalation": { "notifyCircleOnConfirm": true, "escalateWhenHeartbeatLost": false, "heartbeatTimeoutSeconds": 15 },
+            "updatedAt": Utc::now(),
+        }).to_string();
+        let saved = router
+            .clone()
+            .oneshot(
+                Request::put("/v1/vault")
+                    .header("content-type", "application/json")
+                    .header("x-device-id", sender.device_id.to_string())
+                    .header("authorization", sender_auth.clone())
+                    .body(Body::from(vault))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+
+        let session = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/sos/sessions")
+                    .header("content-type", "application/json")
+                    .header("x-device-id", sender.device_id.to_string())
+                    .header("authorization", sender_auth.clone())
+                    .body(Body::from(serde_json::json!({ "category": "medical", "location": { "latitude": 52.37, "longitude": 4.89, "accuracyMeters": 8.0 } }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(session.into_body(), usize::MAX).await.unwrap();
+        let session: crate::models::SosSession = serde_json::from_slice(&body).unwrap();
+        let confirmed = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/sos/sessions/{}/confirm", session.id))
+                    .header("content-type", "application/json")
+                    .header("x-device-id", sender.device_id.to_string())
+                    .header("authorization", sender_auth)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirmed.status(), StatusCode::OK);
+
+        let network = router
+            .oneshot(
+                Request::get("/v1/network")
+                    .header("x-device-id", receiver.device_id.to_string())
+                    .header("authorization", receiver_auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(network.into_body(), usize::MAX).await.unwrap();
+        let network: crate::models::DecentralertNetwork = serde_json::from_slice(&body).unwrap();
+        assert_eq!(network.connections, vec!["sender_demo"]);
+        assert_eq!(network.alerts.len(), 1);
+        assert_eq!(network.alerts[0].sender_username, "sender_demo");
+        assert_eq!(network.alerts[0].profile.display_name, "Sender Test");
     }
 }

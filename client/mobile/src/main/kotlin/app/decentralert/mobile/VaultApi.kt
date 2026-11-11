@@ -10,12 +10,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class VaultApi(private val baseUrl: String = "https://decentralert.razecrs.com/api") {
-    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
 
-    suspend fun register(): DeviceCredentials {
-        val response = request("/v1/devices/register", "POST", "{\"deviceName\":${json.encodeToString(Build.MODEL)}}", null)
+    suspend fun register(username: String): DeviceCredentials {
+        val body = json.encodeToString(mapOf("deviceName" to Build.MODEL, "username" to username))
+        val response = request("/v1/devices/register", "POST", body, null)
         val registration = json.decodeFromString<DeviceRegistration>(response)
-        return DeviceCredentials(registration.deviceId, registration.deviceToken)
+        return DeviceCredentials(registration.deviceId, registration.deviceToken, registration.username)
     }
 
     suspend fun saveVault(credentials: DeviceCredentials, vault: EmergencyVault): EmergencyVault =
@@ -32,6 +33,22 @@ class VaultApi(private val baseUrl: String = "https://decentralert.razecrs.com/a
 
     suspend fun cancel(credentials: DeviceCredentials, sessionId: String): SosSession =
         json.decodeFromString(request("/v1/sos/sessions/$sessionId/cancel", "POST", "{}", credentials))
+
+    suspend fun network(credentials: DeviceCredentials): DecentralertNetwork =
+        json.decodeFromString(request("/v1/network", "GET", null, credentials))
+
+    suspend fun invite(credentials: DeviceCredentials, username: String): NetworkInvite =
+        json.decodeFromString(
+            request(
+                "/v1/network/invites",
+                "POST",
+                json.encodeToString(CreateNetworkInviteRequest(username)),
+                credentials,
+            ),
+        )
+
+    suspend fun acceptInvite(credentials: DeviceCredentials, inviteId: String): NetworkInvite =
+        json.decodeFromString(request("/v1/network/invites/$inviteId/accept", "POST", "{}", credentials))
 
     private suspend fun request(path: String, method: String, body: String?, credentials: DeviceCredentials?): String = withContext(Dispatchers.IO) {
         val connection = URL("$baseUrl$path").openConnection() as HttpURLConnection

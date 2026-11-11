@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import app.decentralert.shared.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -76,16 +77,23 @@ private fun EmergencyApp() {
     var selectedCategory by remember { mutableStateOf(EmergencyCategory.UNKNOWN) }
     var error by remember { mutableStateOf<String?>(null) }
     var startRequest by remember { mutableIntStateOf(0) }
+    var startingSession by remember { mutableStateOf(false) }
+    var network by remember { mutableStateOf<DecentralertNetwork?>(null) }
 
     LaunchedEffect(vault) { store.saveVault(vault) }
 
     suspend fun ensureCredentials(): DeviceCredentials {
         credentials?.let { return it }
-        syncStatus = "Registering device"
-        val registered = api.register()
-        store.saveCredentials(registered)
-        credentials = registered
-        return registered
+        error("Create your Decentralert username first")
+    }
+
+    LaunchedEffect(credentials?.deviceId) {
+        while (true) {
+            credentials?.let { auth ->
+                runCatching { api.network(auth) }.onSuccess { network = it }
+            }
+            delay(2_000)
+        }
     }
 
     suspend fun syncVault(): EmergencyVault {
@@ -116,7 +124,12 @@ private fun EmergencyApp() {
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startRequest++ else error = "Location permission is required to create an SOS session."
+        if (granted) {
+            startingSession = true
+            startRequest++
+        } else {
+            error = "Location permission is required to create an SOS session."
+        }
     }
 
     LaunchedEffect(startRequest) {
@@ -127,7 +140,7 @@ private fun EmergencyApp() {
             section = AppSection.PROFILE
             return@LaunchedEffect
         }
-        runCatching {
+        try {
             syncVault()
             val capturedLocation = currentLocation(context) ?: error("Location is unavailable. Enable location services and try again.")
             val location = capturedLocation.forConsent(vault.consent.sharePreciseLocation)
@@ -148,7 +161,13 @@ private fun EmergencyApp() {
             )
             activeSession = session
             coordinator.activate(selectedCategory)
-        }.onFailure { error = it.message ?: "Could not create the server SOS session" }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            error = failure.message ?: "Could not create the server SOS session"
+        } finally {
+            startingSession = false
+        }
     }
 
     LaunchedEffect(state, activeSession?.id) {
@@ -168,6 +187,35 @@ private fun EmergencyApp() {
     MaterialTheme(
         colorScheme = darkColorScheme(primary = Mint, secondary = Amber, background = Ink, surface = Panel),
     ) {
+        if (credentials == null) {
+            OnboardingScreen(
+                initialName = vault.profile.displayName,
+                error = error,
+                onCreate = { displayName, username ->
+                    scope.launch {
+                        error = null
+                        syncStatus = "Creating account"
+                        runCatching {
+                            val registered = api.register(username)
+                            val updatedVault = vault.copy(
+                                profile = vault.profile.copy(displayName = displayName),
+                                updatedAt = Instant.now().toString(),
+                            )
+                            store.saveCredentials(registered)
+                            store.saveVault(updatedVault)
+                            api.saveVault(registered, updatedVault)
+                            credentials = registered
+                            vault = updatedVault
+                            syncStatus = "Vault synced"
+                        }.onFailure {
+                            error = it.message ?: "Could not create Decentralert account"
+                            syncStatus = "Account setup failed"
+                        }
+                    }
+                },
+            )
+            return@MaterialTheme
+        }
         Scaffold(
             containerColor = Ink,
             bottomBar = {
@@ -184,7 +232,7 @@ private fun EmergencyApp() {
             },
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding).background(Ink)) {
-                AppHeader(syncStatus)
+                AppHeader(syncStatus, credentials?.username)
                 error?.let { ErrorBanner(it) }
                 when (section) {
                     AppSection.SOS -> SosScreen(
@@ -192,10 +240,19 @@ private fun EmergencyApp() {
                         vault = vault,
                         category = selectedCategory,
                         activeSession = activeSession,
+                        inboundAlert = network?.alerts?.firstOrNull(),
+                        connectedCount = network?.connections?.size ?: 0,
+                        preparing = startingSession,
                         onCategory = { selectedCategory = it },
                         onActivate = {
-                            if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) startRequest++
-                            else permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                            if (!startingSession) {
+                                if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                                    startingSession = true
+                                    startRequest++
+                                } else {
+                                    permissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+                                }
+                            }
                         },
                         onCancel = {
                             val session = activeSession
@@ -216,8 +273,26 @@ private fun EmergencyApp() {
                     )
                     AppSection.CIRCLE -> CircleScreen(
                         vault = vault,
+                        username = credentials?.username.orEmpty(),
+                        network = network,
                         onVaultChange = { vault = it },
                         onSave = { scope.launch { runCatching { syncVault() }.onFailure { error = it.message } } },
+                        onInvite = { target ->
+                            val auth = credentials
+                            if (auth != null) scope.launch {
+                                runCatching { api.invite(auth, target) }
+                                    .onSuccess { network = api.network(auth) }
+                                    .onFailure { error = it.message }
+                            }
+                        },
+                        onAccept = { inviteId ->
+                            val auth = credentials
+                            if (auth != null) scope.launch {
+                                runCatching { api.acceptInvite(auth, inviteId) }
+                                    .onSuccess { network = api.network(auth) }
+                                    .onFailure { error = it.message }
+                            }
+                        },
                     )
                 }
             }
@@ -226,11 +301,48 @@ private fun EmergencyApp() {
 }
 
 @Composable
-private fun AppHeader(syncStatus: String) {
+private fun OnboardingScreen(
+    initialName: String,
+    error: String?,
+    onCreate: (String, String) -> Unit,
+) {
+    var displayName by remember { mutableStateOf(initialName) }
+    var username by remember { mutableStateOf("") }
+    Column(
+        Modifier.fillMaxSize().background(Ink).padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Box(Modifier.size(54.dp).background(Mint, RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+            Text("D", color = Ink, fontSize = 28.sp, fontWeight = FontWeight.Black)
+        }
+        Spacer(Modifier.height(24.dp))
+        Text("Join Decentralert", color = Color.White, fontSize = 32.sp, fontWeight = FontWeight.Black)
+        Text("Create a private device session and a username your trusted people can add.", color = Muted, fontSize = 14.sp)
+        Spacer(Modifier.height(24.dp))
+        VaultField("Display name, test data only", displayName) { displayName = it }
+        Spacer(Modifier.height(12.dp))
+        VaultField("Decentralert username", username) {
+            username = it.lowercase().filter { character -> character.isLetterOrDigit() || character == '_' }.take(24)
+        }
+        Text("3 to 24 lowercase letters, numbers, or underscores", color = Muted, fontSize = 11.sp)
+        error?.let { Spacer(Modifier.height(12.dp)); ErrorBanner(it) }
+        Spacer(Modifier.height(20.dp))
+        Button(
+            onClick = { onCreate(displayName.trim(), username.trim()) },
+            enabled = displayName.isNotBlank() && username.length in 3..24,
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Create secure device session") }
+        Spacer(Modifier.height(14.dp))
+        Text("Prototype account only. No password recovery or verified identity yet.", color = Amber, fontSize = 11.sp)
+    }
+}
+
+@Composable
+private fun AppHeader(syncStatus: String, username: String?) {
     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(38.dp).background(Mint, RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) { Text("D", color = Ink, fontWeight = FontWeight.Black) }
         Spacer(Modifier.width(10.dp))
-        Column { Text("DECENTRALERT", color = Color.White, fontWeight = FontWeight.Black); Text("Emergency Vault", color = Muted, fontSize = 11.sp) }
+        Column { Text("DECENTRALERT", color = Color.White, fontWeight = FontWeight.Black); Text(username?.let { "@$it" } ?: "Emergency Vault", color = Muted, fontSize = 11.sp) }
         Spacer(Modifier.weight(1f))
         Text(syncStatus, color = if (syncStatus.contains("synced", true)) Mint else Muted, fontSize = 11.sp)
     }
@@ -247,6 +359,9 @@ private fun SosScreen(
     vault: EmergencyVault,
     category: EmergencyCategory,
     activeSession: SosSession?,
+    inboundAlert: InAppAlert?,
+    connectedCount: Int,
+    preparing: Boolean,
     onCategory: (EmergencyCategory) -> Unit,
     onActivate: () -> Unit,
     onCancel: () -> Unit,
@@ -254,7 +369,23 @@ private fun SosScreen(
     onReset: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        Text("${vault.circle.count { it.accepted }} accepted contacts · ${if (vault.escalation.escalateWhenHeartbeatLost) "offline handoff on" else "offline handoff off"}", color = if (vault.escalation.escalateWhenHeartbeatLost) Amber else Muted, fontSize = 12.sp)
+        inboundAlert?.let { alert ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Danger.copy(alpha = .18f)),
+                modifier = Modifier.fillMaxWidth().border(1.dp, Danger, RoundedCornerShape(16.dp)),
+            ) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("LIVE SOS FROM @${alert.senderUsername}", color = Danger, fontSize = 12.sp, fontWeight = FontWeight.Black)
+                    Text("${alert.senderDisplayName} · ${alert.category.name.lowercase().replaceFirstChar { it.uppercase() }}", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text("Location ${alert.location.latitude}, ${alert.location.longitude}", color = Mint, fontSize = 12.sp)
+                    val medical = (alert.profile.conditions + alert.profile.allergies).joinToString().ifBlank { "No shared medical flags" }
+                    Text(medical, color = Muted, fontSize = 12.sp)
+                    Text(if (alert.offlineEscalation) "Phone heartbeat lost" else "User confirmed SOS", color = Amber, fontSize = 11.sp)
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+        Text("$connectedCount Decentralert connections · ${if (vault.escalation.escalateWhenHeartbeatLost) "offline handoff on" else "offline handoff off"}", color = if (vault.escalation.escalateWhenHeartbeatLost) Amber else Muted, fontSize = 12.sp)
         Spacer(Modifier.height(22.dp))
         when (val current = state) {
             SosState.Idle, SosState.Cancelled -> {
@@ -268,7 +399,7 @@ private fun SosScreen(
                     }
                 }
                 Spacer(Modifier.height(30.dp))
-                Button(onClick = onActivate, modifier = Modifier.size(210.dp), shape = CircleShape, colors = ButtonDefaults.buttonColors(containerColor = Danger, contentColor = Color(0xFF341229))) { Text("SOS", fontSize = 44.sp, fontWeight = FontWeight.Black) }
+                Button(onClick = onActivate, enabled = !preparing, modifier = Modifier.size(210.dp), shape = CircleShape, colors = ButtonDefaults.buttonColors(containerColor = Danger, contentColor = Color(0xFF341229))) { Text(if (preparing) "Preparing" else "SOS", fontSize = if (preparing) 22.sp else 44.sp, fontWeight = FontWeight.Black) }
                 Spacer(Modifier.height(18.dp))
                 Text(if (vault.profile.displayName.isBlank()) "Profile setup required" else "Vault ready for ${vault.profile.displayName}", color = if (vault.profile.displayName.isBlank()) Danger else Mint, fontSize = 12.sp)
             }
@@ -284,7 +415,7 @@ private fun SosScreen(
             is SosState.Sent -> {
                 Text("SOS confirmed", color = Mint, fontSize = 26.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(12.dp))
-                Text("${activeSession?.notificationAttempts?.size ?: 0} Emergency Circle contacts notified in simulation", color = Color.White)
+                Text("${activeSession?.notificationAttempts?.size ?: 0} Emergency Circle delivery attempts completed", color = Color.White)
                 Text("Police, fire, medical, and rescue adapters remain simulated.", color = Muted, fontSize = 12.sp)
                 Spacer(Modifier.height(22.dp)); Button(onClick = onReset) { Text("Return to safety screen") }
             }
@@ -315,42 +446,82 @@ private fun ProfileScreen(vault: EmergencyVault, onVaultChange: (EmergencyVault)
         item { SettingSwitch("Consented snapshots", "Planned, not captured by this build", vault.consent.consentedSnapshots) { onVaultChange(vault.copy(consent = vault.consent.copy(consentedSnapshots = it))) } }
         item { SettingSwitch("Offline emergency handoff", "Escalate if heartbeats stop for 15 seconds", vault.escalation.escalateWhenHeartbeatLost) { onVaultChange(vault.copy(escalation = vault.escalation.copy(escalateWhenHeartbeatLost = it))) } }
         item { Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save and sync Emergency Vault") } }
-        item { Text("Vault access uses a device token. Production requires Android Keystore storage, end-to-end encryption, and authority review.", color = Muted, fontSize = 11.sp) }
+        item { Text("The local vault and token are protected by Android Keystore. Server-side end-to-end encryption and authority review are still required for production.", color = Muted, fontSize = 11.sp) }
     }
 }
 
 @Composable
-private fun CircleScreen(vault: EmergencyVault, onVaultChange: (EmergencyVault) -> Unit, onSave: () -> Unit) {
+private fun CircleScreen(
+    vault: EmergencyVault,
+    username: String,
+    network: DecentralertNetwork?,
+    onVaultChange: (EmergencyVault) -> Unit,
+    onSave: () -> Unit,
+    onInvite: (String) -> Unit,
+    onAccept: (String) -> Unit,
+) {
     var name by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
     var relationship by remember { mutableStateOf("") }
+    var contactUsername by remember { mutableStateOf("") }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Text("Emergency Circle", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold); Text("Contacts run in parallel with simulated services.", color = Muted, fontSize = 12.sp) }
+        item { Text("Emergency Circle", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold); Text("Accepted Decentralert connections receive an authenticated in-app SOS.", color = Muted, fontSize = 12.sp) }
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = Mint.copy(alpha = .10f)), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(14.dp)) {
+                    Text("YOUR DECENTRALERT CODE", color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                    Text("@$username", color = Mint, fontSize = 22.sp, fontWeight = FontWeight.Black)
+                    Text("Share this username with someone you trust.", color = Muted, fontSize = 11.sp)
+                }
+            }
+        }
+        if (!network?.incomingInvites.isNullOrEmpty()) {
+            item { SectionTitle("Connection requests") }
+            items(network.incomingInvites, key = { "invite-${it.id}" }) { invite ->
+                Card(colors = CardDefaults.cardColors(containerColor = Panel), modifier = Modifier.fillMaxWidth().border(1.dp, Amber, RoundedCornerShape(14.dp))) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) { Text("@${invite.fromUsername}", color = Color.White, fontWeight = FontWeight.Bold); Text("wants to add you as a trusted contact", color = Muted, fontSize = 11.sp) }
+                        Button(onClick = { onAccept(invite.id) }) { Text("Accept") }
+                    }
+                }
+            }
+        }
+        item { SectionTitle("Add trusted person") }
         item { VaultField("Contact name", name) { name = it } }
+        item { VaultField("Their Decentralert username", contactUsername) { value -> contactUsername = value.lowercase().filter { it.isLetterOrDigit() || it == '_' }.take(24) } }
         item { VaultField("Phone number", phone) { phone = it } }
         item { VaultField("Relationship", relationship) { relationship = it } }
         item {
             Button(
-                enabled = name.isNotBlank() && phone.isNotBlank() && vault.circle.size < 12,
+                enabled = name.isNotBlank() && phone.isNotBlank() && contactUsername.length in 3..24 && vault.circle.size < 12,
                 onClick = {
-                    val member = CircleMember(id = UUID.randomUUID().toString(), name = name.trim(), phone = phone.trim(), relationship = relationship.ifBlank { null }, priority = vault.circle.size + 1)
-                    onVaultChange(vault.copy(circle = vault.circle + member)); name = ""; phone = ""; relationship = ""
+                    val target = contactUsername.trim()
+                    val member = CircleMember(
+                        id = UUID.randomUUID().toString(),
+                        name = name.trim(),
+                        phone = phone.trim(),
+                        relationship = relationship.ifBlank { null },
+                        decentralertUsername = target,
+                        priority = vault.circle.size + 1,
+                    )
+                    onVaultChange(vault.copy(circle = vault.circle + member))
+                    onInvite(target)
+                    name = ""; phone = ""; relationship = ""; contactUsername = ""
                 },
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Add contact") }
+            ) { Text("Add and send invite") }
         }
         items(vault.circle, key = { it.id }) { member ->
+            val connected = member.decentralertUsername?.let { it in network?.connections.orEmpty() } == true
             Card(colors = CardDefaults.cardColors(containerColor = Panel), modifier = Modifier.fillMaxWidth().border(1.dp, Line, RoundedCornerShape(14.dp))) {
                 Column(Modifier.padding(14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(member.name, color = Color.White, fontWeight = FontWeight.Bold); Text("${member.relationship ?: "Trusted contact"} · ${member.phone}", color = Muted, fontSize = 12.sp) }; Text(if (member.accepted) "ACCEPTED" else "INVITE NEEDED", color = if (member.accepted) Mint else Amber, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
-                    Spacer(Modifier.height(8.dp))
-                    SettingSwitch("Confirmed for this demo", "Real contacts must accept an invitation", member.accepted) { accepted -> onVaultChange(vault.copy(circle = vault.circle.map { if (it.id == member.id) it.copy(accepted = accepted) else it })) }
+                    Row(verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text(member.name, color = Color.White, fontWeight = FontWeight.Bold); Text("@${member.decentralertUsername} · ${member.relationship ?: "Trusted contact"}", color = Muted, fontSize = 12.sp) }; Text(if (connected) "CONNECTED" else "INVITED", color = if (connected) Mint else Amber, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
                     TextButton(onClick = { onVaultChange(vault.copy(circle = vault.circle.filterNot { it.id == member.id })) }) { Text("Remove", color = Danger) }
                 }
             }
         }
         item { Button(onClick = onSave, modifier = Modifier.fillMaxWidth()) { Text("Save and sync Emergency Circle") } }
-        item { Text("Calls, SMS, and push notifications are simulated in this build. No real message is sent.", color = Muted, fontSize = 11.sp) }
+        item { Text("Decentralert in-app delivery is live while both apps are online. Calls, SMS, push, and government dispatch remain simulated.", color = Muted, fontSize = 11.sp) }
     }
 }
 

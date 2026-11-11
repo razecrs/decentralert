@@ -15,7 +15,7 @@
 - **Unauthorized public warning:** operator authentication, least-privilege role, two-person confirmation in production, immutable audit event, and authority adapter allow-list.
 - **Health-data disclosure:** field-level authorization, data minimization, encryption, purpose-bound access, and short retention.
 - **Lost or compromised phone:** store device tokens in the platform keystore, support remote token revocation, require local authentication for vault edits, and never expose vault contents through public incident reads.
-- **Emergency Circle abuse:** require verified invitations and explicit acceptance, rate-limit notification attempts, expose clear revocation, and record auditable consent. The prototype only simulates these steps.
+- **Emergency Circle abuse:** require username invitations and explicit recipient acceptance before in-app delivery, rate-limit notification attempts, expose clear revocation, and record auditable consent. The prototype implements invitation acceptance but still needs rate limits and a complete revocation workflow.
 - **Phone failure during SOS:** persist the pre-alert before the countdown, send authenticated heartbeats, and require explicit opt-in before server-side heartbeat-loss escalation.
 - **Evidence tampering:** hash evidence on the device, retain capture/consent metadata, sign server receipts, and never treat images or AI labels as sole truth.
 - **AI misclassification:** advisory-only labels with confidence and model version; always show original evidence; no face recognition or emotion inference; never block dispatch.

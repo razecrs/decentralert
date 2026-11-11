@@ -229,6 +229,7 @@ impl Incident {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRecord {
     pub id: Uuid,
+    pub username: String,
     pub token_hash: String,
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
@@ -238,6 +239,7 @@ pub struct DeviceRecord {
 #[serde(rename_all = "camelCase")]
 pub struct DeviceRegistrationRequest {
     pub device_name: Option<String>,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +247,7 @@ pub struct DeviceRegistrationRequest {
 pub struct DeviceRegistration {
     pub device_id: Uuid,
     pub device_token: String,
+    pub username: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -253,6 +256,7 @@ pub enum NotificationChannel {
     Call,
     Sms,
     Push,
+    InApp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -262,6 +266,7 @@ pub struct CircleMember {
     pub name: String,
     pub phone: String,
     pub relationship: Option<String>,
+    pub decentralert_username: Option<String>,
     #[serde(default)]
     pub channels: Vec<NotificationChannel>,
     #[serde(default)]
@@ -270,8 +275,60 @@ pub struct CircleMember {
     pub priority: u8,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NetworkInviteStatus {
+    Pending,
+    Accepted,
+    Declined,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct NetworkInvite {
+    pub id: Uuid,
+    pub from_device_id: Uuid,
+    pub to_device_id: Uuid,
+    pub from_username: String,
+    pub to_username: String,
+    pub status: NetworkInviteStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateNetworkInviteRequest {
+    pub username: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct InAppAlert {
+    pub id: Uuid,
+    pub recipient_device_id: Uuid,
+    pub source_session_id: Uuid,
+    pub incident_id: Uuid,
+    pub sender_username: String,
+    pub sender_display_name: String,
+    pub category: EmergencyCategory,
+    pub location: GeoPoint,
+    pub profile: EmergencyProfile,
+    pub offline_escalation: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecentralertNetwork {
+    pub username: String,
+    pub incoming_invites: Vec<NetworkInvite>,
+    pub connections: Vec<String>,
+    pub alerts: Vec<InAppAlert>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
 pub struct VaultConsent {
     pub share_precise_location: bool,
     pub share_medical_profile: bool,
@@ -293,7 +350,7 @@ impl Default for VaultConsent {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct EscalationPolicy {
     pub notify_circle_on_confirm: bool,
     pub escalate_when_heartbeat_lost: bool,

@@ -122,6 +122,7 @@ data class Incident(
 data class DeviceRegistration(
     val deviceId: String,
     val deviceToken: String,
+    val username: String,
 )
 
 @Serializable
@@ -129,6 +130,7 @@ enum class NotificationChannel {
     @SerialName("call") CALL,
     @SerialName("sms") SMS,
     @SerialName("push") PUSH,
+    @SerialName("in_app") IN_APP,
 }
 
 @Serializable
@@ -137,9 +139,55 @@ data class CircleMember(
     val name: String,
     val phone: String,
     val relationship: String? = null,
+    val decentralertUsername: String? = null,
     val channels: List<NotificationChannel> = listOf(NotificationChannel.CALL, NotificationChannel.SMS),
     val accepted: Boolean = false,
     val priority: Int = 0,
+)
+
+@Serializable
+enum class NetworkInviteStatus {
+    @SerialName("pending") PENDING,
+    @SerialName("accepted") ACCEPTED,
+    @SerialName("declined") DECLINED,
+}
+
+@Serializable
+data class NetworkInvite(
+    val id: String,
+    val fromDeviceId: String,
+    val toDeviceId: String,
+    val fromUsername: String,
+    val toUsername: String,
+    val status: NetworkInviteStatus,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class CreateNetworkInviteRequest(val username: String)
+
+@Serializable
+data class InAppAlert(
+    val id: String,
+    val recipientDeviceId: String,
+    val sourceSessionId: String,
+    val incidentId: String,
+    val senderUsername: String,
+    val senderDisplayName: String,
+    val category: EmergencyCategory,
+    val location: GeoPoint,
+    val profile: EmergencyProfile,
+    val offlineEscalation: Boolean,
+    val createdAt: String,
+)
+
+@Serializable
+data class DecentralertNetwork(
+    val username: String,
+    val incomingInvites: List<NetworkInvite> = emptyList(),
+    val connections: List<String> = emptyList(),
+    val alerts: List<InAppAlert> = emptyList(),
 )
 
 @Serializable

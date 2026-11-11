@@ -7,8 +7,8 @@ use uuid::Uuid;
 use crate::{
     error::ApiError,
     models::{
-        DeviceRecord, EmergencyVault, GeoPoint, Incident, PublicWarning, SosSession,
-        VerifiedResponder,
+        DeviceRecord, EmergencyVault, GeoPoint, InAppAlert, Incident, NetworkInvite,
+        NetworkInviteStatus, PublicWarning, SosSession, VerifiedResponder,
     },
 };
 
@@ -27,7 +27,16 @@ pub trait IncidentRepository: Send + Sync {
     async fn save_warning(&self, warning: PublicWarning) -> Result<(), ApiError>;
     async fn register_device(&self, device: DeviceRecord) -> Result<(), ApiError>;
     async fn device(&self, id: Uuid) -> Result<Option<DeviceRecord>, ApiError>;
+    async fn device_by_username(&self, username: &str) -> Result<Option<DeviceRecord>, ApiError>;
     async fn touch_device(&self, id: Uuid) -> Result<(), ApiError>;
+    async fn insert_invite(&self, invite: NetworkInvite) -> Result<NetworkInvite, ApiError>;
+    async fn network_invite(&self, id: Uuid) -> Result<Option<NetworkInvite>, ApiError>;
+    async fn update_invite(&self, invite: NetworkInvite) -> Result<NetworkInvite, ApiError>;
+    async fn incoming_invites(&self, device_id: Uuid) -> Result<Vec<NetworkInvite>, ApiError>;
+    async fn accepted_connection(&self, a: Uuid, b: Uuid) -> Result<bool, ApiError>;
+    async fn connections(&self, device_id: Uuid) -> Result<Vec<String>, ApiError>;
+    async fn insert_alert(&self, alert: InAppAlert) -> Result<InAppAlert, ApiError>;
+    async fn alerts(&self, device_id: Uuid) -> Result<Vec<InAppAlert>, ApiError>;
     async fn save_vault(
         &self,
         device_id: Uuid,
@@ -46,6 +55,8 @@ pub struct MemoryRepository {
     responders: RwLock<Vec<VerifiedResponder>>,
     warnings: RwLock<Vec<PublicWarning>>,
     devices: RwLock<HashMap<Uuid, DeviceRecord>>,
+    invites: RwLock<HashMap<Uuid, NetworkInvite>>,
+    alerts: RwLock<HashMap<Uuid, InAppAlert>>,
     vaults: RwLock<HashMap<Uuid, EmergencyVault>>,
     sos_sessions: RwLock<HashMap<Uuid, SosSession>>,
 }
@@ -92,6 +103,8 @@ impl MemoryRepository {
             responders: RwLock::new(responders),
             warnings: RwLock::default(),
             devices: RwLock::default(),
+            invites: RwLock::default(),
+            alerts: RwLock::default(),
             vaults: RwLock::default(),
             sos_sessions: RwLock::default(),
         }
@@ -173,11 +186,99 @@ impl IncidentRepository for MemoryRepository {
     async fn device(&self, id: Uuid) -> Result<Option<DeviceRecord>, ApiError> {
         Ok(self.devices.read().unwrap().get(&id).cloned())
     }
+    async fn device_by_username(&self, username: &str) -> Result<Option<DeviceRecord>, ApiError> {
+        Ok(self
+            .devices
+            .read()
+            .unwrap()
+            .values()
+            .find(|device| device.username == username)
+            .cloned())
+    }
     async fn touch_device(&self, id: Uuid) -> Result<(), ApiError> {
         if let Some(device) = self.devices.write().unwrap().get_mut(&id) {
             device.last_seen_at = chrono::Utc::now();
         }
         Ok(())
+    }
+    async fn insert_invite(&self, invite: NetworkInvite) -> Result<NetworkInvite, ApiError> {
+        self.invites
+            .write()
+            .unwrap()
+            .insert(invite.id, invite.clone());
+        Ok(invite)
+    }
+    async fn network_invite(&self, id: Uuid) -> Result<Option<NetworkInvite>, ApiError> {
+        Ok(self.invites.read().unwrap().get(&id).cloned())
+    }
+    async fn update_invite(&self, invite: NetworkInvite) -> Result<NetworkInvite, ApiError> {
+        self.invites
+            .write()
+            .unwrap()
+            .insert(invite.id, invite.clone());
+        Ok(invite)
+    }
+    async fn incoming_invites(&self, device_id: Uuid) -> Result<Vec<NetworkInvite>, ApiError> {
+        let mut items: Vec<_> = self
+            .invites
+            .read()
+            .unwrap()
+            .values()
+            .filter(|invite| {
+                invite.to_device_id == device_id && invite.status == NetworkInviteStatus::Pending
+            })
+            .cloned()
+            .collect();
+        items.sort_by_key(|invite| std::cmp::Reverse(invite.created_at));
+        Ok(items)
+    }
+    async fn accepted_connection(&self, a: Uuid, b: Uuid) -> Result<bool, ApiError> {
+        Ok(self.invites.read().unwrap().values().any(|invite| {
+            invite.status == NetworkInviteStatus::Accepted
+                && ((invite.from_device_id == a && invite.to_device_id == b)
+                    || (invite.from_device_id == b && invite.to_device_id == a))
+        }))
+    }
+    async fn connections(&self, device_id: Uuid) -> Result<Vec<String>, ApiError> {
+        let devices = self.devices.read().unwrap();
+        let mut usernames: Vec<_> = self
+            .invites
+            .read()
+            .unwrap()
+            .values()
+            .filter(|invite| {
+                invite.status == NetworkInviteStatus::Accepted
+                    && (invite.from_device_id == device_id || invite.to_device_id == device_id)
+            })
+            .filter_map(|invite| {
+                let other = if invite.from_device_id == device_id {
+                    invite.to_device_id
+                } else {
+                    invite.from_device_id
+                };
+                devices.get(&other).map(|device| device.username.clone())
+            })
+            .collect();
+        usernames.sort();
+        usernames.dedup();
+        Ok(usernames)
+    }
+    async fn insert_alert(&self, alert: InAppAlert) -> Result<InAppAlert, ApiError> {
+        self.alerts.write().unwrap().insert(alert.id, alert.clone());
+        Ok(alert)
+    }
+    async fn alerts(&self, device_id: Uuid) -> Result<Vec<InAppAlert>, ApiError> {
+        let mut items: Vec<_> = self
+            .alerts
+            .read()
+            .unwrap()
+            .values()
+            .filter(|alert| alert.recipient_device_id == device_id)
+            .cloned()
+            .collect();
+        items.sort_by_key(|alert| std::cmp::Reverse(alert.created_at));
+        items.truncate(50);
+        Ok(items)
     }
     async fn save_vault(
         &self,
@@ -325,8 +426,8 @@ impl IncidentRepository for PostgresRepository {
         Ok(())
     }
     async fn register_device(&self, device: DeviceRecord) -> Result<(), ApiError> {
-        sqlx::query("INSERT INTO device_registrations (id,token_hash,created_at,last_seen_at) VALUES ($1,$2,$3,$4)")
-            .bind(device.id).bind(device.token_hash).bind(device.created_at).bind(device.last_seen_at)
+        sqlx::query("INSERT INTO device_registrations (id,username,token_hash,created_at,last_seen_at) VALUES ($1,$2,$3,$4,$5)")
+            .bind(device.id).bind(device.username).bind(device.token_hash).bind(device.created_at).bind(device.last_seen_at)
             .execute(&self.pool).await?;
         Ok(())
     }
@@ -334,22 +435,47 @@ impl IncidentRepository for PostgresRepository {
         let row: Option<(
             Uuid,
             String,
+            String,
             chrono::DateTime<chrono::Utc>,
             chrono::DateTime<chrono::Utc>,
         )> = sqlx::query_as(
-            "SELECT id,token_hash,created_at,last_seen_at FROM device_registrations WHERE id=$1",
+            "SELECT id,username,token_hash,created_at,last_seen_at FROM device_registrations WHERE id=$1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(
-            row.map(|(id, token_hash, created_at, last_seen_at)| DeviceRecord {
+        Ok(row.map(
+            |(id, username, token_hash, created_at, last_seen_at)| DeviceRecord {
                 id,
+                username,
                 token_hash,
                 created_at,
                 last_seen_at,
-            }),
+            },
+        ))
+    }
+    async fn device_by_username(&self, username: &str) -> Result<Option<DeviceRecord>, ApiError> {
+        let row: Option<(
+            Uuid,
+            String,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT id,username,token_hash,created_at,last_seen_at FROM device_registrations WHERE username=$1",
         )
+        .bind(username)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(id, username, token_hash, created_at, last_seen_at)| DeviceRecord {
+                id,
+                username,
+                token_hash,
+                created_at,
+                last_seen_at,
+            },
+        ))
     }
     async fn touch_device(&self, id: Uuid) -> Result<(), ApiError> {
         sqlx::query("UPDATE device_registrations SET last_seen_at=NOW() WHERE id=$1")
@@ -357,6 +483,78 @@ impl IncidentRepository for PostgresRepository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+    async fn insert_invite(&self, invite: NetworkInvite) -> Result<NetworkInvite, ApiError> {
+        let payload =
+            serde_json::to_value(&invite).map_err(|error| ApiError::Storage(error.to_string()))?;
+        sqlx::query("INSERT INTO network_invites (id,from_device_id,to_device_id,status,payload,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+            .bind(invite.id).bind(invite.from_device_id).bind(invite.to_device_id).bind("pending").bind(payload).bind(invite.created_at).bind(invite.updated_at).execute(&self.pool).await?;
+        Ok(invite)
+    }
+    async fn network_invite(&self, id: Uuid) -> Result<Option<NetworkInvite>, ApiError> {
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT payload FROM network_invites WHERE id=$1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|(payload,)| {
+            serde_json::from_value(payload).map_err(|error| ApiError::Storage(error.to_string()))
+        })
+        .transpose()
+    }
+    async fn update_invite(&self, invite: NetworkInvite) -> Result<NetworkInvite, ApiError> {
+        let payload =
+            serde_json::to_value(&invite).map_err(|error| ApiError::Storage(error.to_string()))?;
+        let status = match invite.status {
+            NetworkInviteStatus::Pending => "pending",
+            NetworkInviteStatus::Accepted => "accepted",
+            NetworkInviteStatus::Declined => "declined",
+        };
+        sqlx::query("UPDATE network_invites SET status=$2,payload=$3,updated_at=$4 WHERE id=$1")
+            .bind(invite.id)
+            .bind(status)
+            .bind(payload)
+            .bind(invite.updated_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(invite)
+    }
+    async fn incoming_invites(&self, device_id: Uuid) -> Result<Vec<NetworkInvite>, ApiError> {
+        let rows: Vec<(serde_json::Value,)> = sqlx::query_as("SELECT payload FROM network_invites WHERE to_device_id=$1 AND status='pending' ORDER BY created_at DESC")
+            .bind(device_id).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|(payload,)| {
+                serde_json::from_value(payload)
+                    .map_err(|error| ApiError::Storage(error.to_string()))
+            })
+            .collect()
+    }
+    async fn accepted_connection(&self, a: Uuid, b: Uuid) -> Result<bool, ApiError> {
+        let row: (bool,) = sqlx::query_as("SELECT EXISTS(SELECT 1 FROM network_invites WHERE status='accepted' AND ((from_device_id=$1 AND to_device_id=$2) OR (from_device_id=$2 AND to_device_id=$1)))")
+            .bind(a).bind(b).fetch_one(&self.pool).await?;
+        Ok(row.0)
+    }
+    async fn connections(&self, device_id: Uuid) -> Result<Vec<String>, ApiError> {
+        let rows: Vec<(String,)> = sqlx::query_as("SELECT DISTINCT CASE WHEN invite.from_device_id=$1 THEN recipient.username ELSE sender.username END FROM network_invites invite JOIN device_registrations sender ON sender.id=invite.from_device_id JOIN device_registrations recipient ON recipient.id=invite.to_device_id WHERE invite.status='accepted' AND (invite.from_device_id=$1 OR invite.to_device_id=$1) ORDER BY 1")
+            .bind(device_id).fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(|(username,)| username).collect())
+    }
+    async fn insert_alert(&self, alert: InAppAlert) -> Result<InAppAlert, ApiError> {
+        let payload =
+            serde_json::to_value(&alert).map_err(|error| ApiError::Storage(error.to_string()))?;
+        sqlx::query("INSERT INTO in_app_alerts (id,recipient_device_id,payload,created_at) VALUES ($1,$2,$3,$4)")
+            .bind(alert.id).bind(alert.recipient_device_id).bind(payload).bind(alert.created_at).execute(&self.pool).await?;
+        Ok(alert)
+    }
+    async fn alerts(&self, device_id: Uuid) -> Result<Vec<InAppAlert>, ApiError> {
+        let rows: Vec<(serde_json::Value,)> = sqlx::query_as("SELECT payload FROM in_app_alerts WHERE recipient_device_id=$1 ORDER BY created_at DESC LIMIT 50")
+            .bind(device_id).fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|(payload,)| {
+                serde_json::from_value(payload)
+                    .map_err(|error| ApiError::Storage(error.to_string()))
+            })
+            .collect()
     }
     async fn save_vault(
         &self,

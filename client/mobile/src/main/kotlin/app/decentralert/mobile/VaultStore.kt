@@ -13,11 +13,11 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-data class DeviceCredentials(val deviceId: String, val deviceToken: String)
+data class DeviceCredentials(val deviceId: String, val deviceToken: String, val username: String)
 
 class VaultStore(context: Context) {
     private val preferences = context.getSharedPreferences("decentralert-vault", Context.MODE_PRIVATE)
-    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
 
     fun loadVault(): EmergencyVault? = preferences.getString("vault", null)?.let { stored ->
         val plaintext = decryptOrLegacy(stored) ?: return@let null
@@ -33,13 +33,15 @@ class VaultStore(context: Context) {
     fun credentials(): DeviceCredentials? {
         val id = preferences.getString("device-id", null)?.let(::decryptOrLegacy) ?: return null
         val token = preferences.getString("device-token", null)?.let(::decryptOrLegacy) ?: return null
-        return DeviceCredentials(id, token)
+        val username = preferences.getString("username", null)?.let(::decryptOrLegacy) ?: return null
+        return DeviceCredentials(id, token, username)
     }
 
     fun saveCredentials(credentials: DeviceCredentials) {
         preferences.edit()
             .putString("device-id", encrypt(credentials.deviceId))
             .putString("device-token", encrypt(credentials.deviceToken))
+            .putString("username", encrypt(credentials.username))
             .apply()
     }
 

@@ -6,11 +6,11 @@ Decentralert coordinates information; it is not itself an emergency control room
 
 ## Incident flow
 
-1. The user creates an Emergency Vault containing a profile, consent choices, and accepted Emergency Circle contacts.
+1. The user creates an Emergency Vault and a Decentralert username, then connects to trusted people through an invite and recipient-acceptance flow.
 2. The Android client registers a device, synchronizes the vault, obtains permissioned location, and persists an authenticated SOS pre-alert before the countdown begins.
 3. The shared `SosCoordinator` starts a visible 30-second countdown while the client sends periodic heartbeats.
 4. Cancellation removes sensitive pending context. `Send now` or timeout confirms the session. If the user opted in, a heartbeat timeout can confirm it as an offline escalation.
-5. The Rust API creates a private incident and records simulated notification attempts for accepted Circle contacts.
+5. The Rust API creates a private incident, records simulated call and SMS attempts, and inserts an authenticated in-app alert for each server-verified Decentralert connection.
 6. Every required configured service adapter receives the same incident ID in parallel.
 7. PostGIS ranks available verified responders; only an approximate area is included in the initial offer.
 8. Public incident reads redact the medical profile, evidence, and sensor context for device-originated private incidents.
@@ -25,7 +25,7 @@ The `shared` module owns wire models, emergency profile types, consent boundarie
 
 ### Mobile
 
-The Android app demonstrates profile editing, consent, Emergency Circle setup, authenticated vault synchronization, SOS pre-alerts, countdown heartbeats, cancellation, and confirmation. It encrypts the local vault and device credential with an app-specific Android Keystore key. Disabling precise-location consent rounds coordinates before upload. A production client must add CameraX/AVFoundation capture adapters, hardware-backed key policy, background-location justification, real notification providers, and accessibility testing. The project is opt-in (`-PenableAndroid=true`) so web/shared builds remain usable without an Android SDK.
+The Android app demonstrates username setup, accepted connections, an authenticated live inbox, profile editing, consent, Emergency Circle setup, vault synchronization, SOS pre-alerts, countdown heartbeats, cancellation, and confirmation. It encrypts the local vault and device credential with an app-specific Android Keystore key. Disabling precise-location consent rounds coordinates before upload. The foreground app polls its inbox every two seconds. A production client must add CameraX/AVFoundation capture adapters, hardware-backed key policy, background-location justification, real push providers, and accessibility testing. The project is opt-in (`-PenableAndroid=true`) so web/shared builds remain usable without an Android SDK.
 
 ### Dashboard
 
