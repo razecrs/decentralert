@@ -1,0 +1,9 @@
+# Replace TUNNEL_UUID with the ID returned by `cloudflared tunnel create`.
+tunnel: TUNNEL_UUID
+credentials-file: /etc/cloudflared/TUNNEL_UUID.json
+no-autoupdate: true
+
+ingress:
+  - hostname: decentralert.razecrs.com
+    service: http://127.0.0.1:4400
+  - service: http_status:404

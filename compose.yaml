@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgis/postgis:17-3.5
+    environment:
+      POSTGRES_DB: decentralert
+      POSTGRES_USER: decentralert
+      POSTGRES_PASSWORD: decentralert
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U decentralert"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - decentralert-postgres:/var/lib/postgresql/data
+
+volumes:
+  decentralert-postgres:
+

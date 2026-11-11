@@ -1,0 +1,30 @@
+# Public traffic arrives through Cloudflare Tunnel. Both services bind to loopback.
+{
+	admin off
+	auto_https off
+}
+
+http://decentralert.razecrs.com:4400 {
+	bind 127.0.0.1
+	encode zstd gzip
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; upgrade-insecure-requests"
+	}
+
+	handle_path /api/* {
+		reverse_proxy 127.0.0.1:8181
+	}
+
+	handle {
+		root * /var/www/decentralert
+		try_files {path} /index.html
+		file_server
+	}
+}

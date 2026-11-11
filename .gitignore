@@ -1,0 +1,26 @@
+.gradle/
+.kotlin/
+**/build/
+**/target/
+.idea/
+*.iml
+.DS_Store
+.env
+local.properties
+dashboard-preview.log
+
+# Credentials and signing material
+*.jks
+*.keystore
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Binary application packages belong in GitHub Releases
+*.apk
+*.aab
+
+# Generated submission media and local editing scripts
+submission/
+
