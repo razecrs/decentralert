@@ -27,11 +27,13 @@
 
 ## What it demonstrates
 
-Decentralert explores how one SOS action could give emergency operators faster, clearer context. A visible 30-second safety window helps prevent accidental alerts. Once confirmed, the concept combines location, emergency type, and only the medical information the user has chosen to share.
+Decentralert explores how one SOS action could give trusted contacts and emergency operators faster, clearer context. A visible 30-second safety window helps prevent accidental alerts. The server stores the pre-alert before confirmation and watches authenticated heartbeats, so an opted-in session can still escalate in the simulation if the phone goes offline. Once confirmed, the concept combines location, emergency type, and only the medical information the user has chosen to share.
 
 The prototype includes:
 
-- An Android SOS flow with Cancel and Send now controls
+- An Android Emergency Vault for medical context, accessibility needs, and consent controls
+- An Emergency Circle with accepted trusted contacts and simulated call, SMS, and push attempts
+- An authenticated SOS pre-alert with Cancel, Send now, and heartbeat-loss escalation
 - A Kotlin Multiplatform incident model and deterministic countdown state machine
 - A Rust and Axum API with idempotent incident creation and service fan-out simulation
 - PostgreSQL and PostGIS persistence with ETA-ranked nearby responders
@@ -56,7 +58,7 @@ See the [judge guide](docs/JUDGES.md) for the two-minute walkthrough.
 
 ### Operator console
 
-The deployed simulation is available at [decentralert.razecrs.com](https://decentralert.razecrs.com). Select **Create demo incident** to watch the simulated service acknowledgements and responder ranking update.
+The deployed simulation is available at [decentralert.razecrs.com](https://decentralert.razecrs.com). Select **Create demo incident** to watch the simulated service acknowledgements and responder ranking update, or create a test profile in the Android build and send a simulated SOS session to the console.
 
 ## Screens
 
@@ -74,7 +76,8 @@ The city routing image is concept art. The Android and operator-console screens 
 
 ```mermaid
 flowchart LR
-    A[Android SOS client] -->|Incident and consented context| B[Rust API]
+    A[Android Emergency Vault] -->|Authenticated pre-alert and heartbeats| B[Rust API]
+    B --> J[Simulated Emergency Circle notifications]
     B --> C[(PostgreSQL and PostGIS)]
     B --> D[Police simulator]
     B --> E[Fire simulator]
@@ -84,7 +87,7 @@ flowchart LR
     C --> I[Kotlin/Wasm operator console]
 ```
 
-The repository is intentionally structured around replaceable service adapters. Current adapters are simulators. A production deployment would require authority-provided endpoints, audited authentication, encryption, retention controls, clinical-safety review, and a DPIA.
+The repository is intentionally structured around replaceable service adapters. Current adapters and contact notifications are simulators. Android protects its local vault and device token with an app-specific Android Keystore key, but the prototype server does not provide end-to-end encrypted vault fields. A production deployment would require authority-provided endpoints, hardware-backed key policy, end-to-end encrypted vault fields, audited authentication, retention controls, clinical-safety review, and a DPIA.
 
 ## Repository layout
 

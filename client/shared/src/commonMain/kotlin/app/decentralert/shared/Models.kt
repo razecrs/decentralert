@@ -110,6 +110,108 @@ data class Incident(
     val sensorContext: SensorContext? = null,
     val dispatchAttempts: List<DispatchAttempt> = emptyList(),
     val responderOffers: List<ResponderOffer> = emptyList(),
+    val sourceSessionId: String? = null,
+    val emergencyCircleNotified: Int = 0,
+    val offlineEscalation: Boolean = false,
+    val privateIncident: Boolean = false,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class DeviceRegistration(
+    val deviceId: String,
+    val deviceToken: String,
+)
+
+@Serializable
+enum class NotificationChannel {
+    @SerialName("call") CALL,
+    @SerialName("sms") SMS,
+    @SerialName("push") PUSH,
+}
+
+@Serializable
+data class CircleMember(
+    val id: String,
+    val name: String,
+    val phone: String,
+    val relationship: String? = null,
+    val channels: List<NotificationChannel> = listOf(NotificationChannel.CALL, NotificationChannel.SMS),
+    val accepted: Boolean = false,
+    val priority: Int = 0,
+)
+
+@Serializable
+data class VaultConsent(
+    val sharePreciseLocation: Boolean = true,
+    val shareMedicalProfile: Boolean = true,
+    val consentedSnapshots: Boolean = false,
+    val consentedAudio: Boolean = false,
+    val consentVersion: String = "2026-11-prototype",
+)
+
+@Serializable
+data class EscalationPolicy(
+    val notifyCircleOnConfirm: Boolean = true,
+    val escalateWhenHeartbeatLost: Boolean = false,
+    val heartbeatTimeoutSeconds: Int = 15,
+)
+
+@Serializable
+data class EmergencyVault(
+    val profile: EmergencyProfile,
+    val circle: List<CircleMember> = emptyList(),
+    val consent: VaultConsent = VaultConsent(),
+    val escalation: EscalationPolicy = EscalationPolicy(),
+    val updatedAt: String,
+)
+
+@Serializable
+data class CreateSosSessionRequest(
+    val category: EmergencyCategory,
+    val location: GeoPoint,
+    val description: String? = null,
+    val sensorContext: SensorContext? = null,
+)
+
+@Serializable
+data class HeartbeatRequest(
+    val location: GeoPoint? = null,
+    val batteryPercent: Int? = null,
+)
+
+@Serializable
+enum class SosSessionStatus {
+    @SerialName("pending_confirmation") PENDING_CONFIRMATION,
+    @SerialName("confirmed") CONFIRMED,
+    @SerialName("escalated_offline") ESCALATED_OFFLINE,
+    @SerialName("cancelled") CANCELLED,
+}
+
+@Serializable
+data class CircleNotificationAttempt(
+    val memberId: String,
+    val memberName: String,
+    val channels: List<NotificationChannel>,
+    val status: String,
+    val attemptedAt: String,
+)
+
+@Serializable
+data class SosSession(
+    val id: String,
+    val deviceId: String,
+    val status: SosSessionStatus,
+    val category: EmergencyCategory,
+    val location: GeoPoint,
+    val description: String? = null,
+    val sensorContext: SensorContext? = null,
+    val vaultSnapshot: EmergencyVault? = null,
+    val notificationAttempts: List<CircleNotificationAttempt> = emptyList(),
+    val incidentId: String? = null,
+    val confirmationDeadline: String,
+    val lastHeartbeatAt: String,
     val createdAt: String,
     val updatedAt: String,
 )

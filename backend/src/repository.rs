@@ -6,7 +6,10 @@ use uuid::Uuid;
 
 use crate::{
     error::ApiError,
-    models::{GeoPoint, Incident, PublicWarning, VerifiedResponder},
+    models::{
+        DeviceRecord, EmergencyVault, GeoPoint, Incident, PublicWarning, SosSession,
+        VerifiedResponder,
+    },
 };
 
 #[async_trait]
@@ -22,6 +25,19 @@ pub trait IncidentRepository: Send + Sync {
         limit: usize,
     ) -> Result<Vec<(VerifiedResponder, u32)>, ApiError>;
     async fn save_warning(&self, warning: PublicWarning) -> Result<(), ApiError>;
+    async fn register_device(&self, device: DeviceRecord) -> Result<(), ApiError>;
+    async fn device(&self, id: Uuid) -> Result<Option<DeviceRecord>, ApiError>;
+    async fn touch_device(&self, id: Uuid) -> Result<(), ApiError>;
+    async fn save_vault(
+        &self,
+        device_id: Uuid,
+        vault: EmergencyVault,
+    ) -> Result<EmergencyVault, ApiError>;
+    async fn vault(&self, device_id: Uuid) -> Result<Option<EmergencyVault>, ApiError>;
+    async fn insert_sos_session(&self, session: SosSession) -> Result<SosSession, ApiError>;
+    async fn update_sos_session(&self, session: SosSession) -> Result<SosSession, ApiError>;
+    async fn sos_session(&self, id: Uuid) -> Result<Option<SosSession>, ApiError>;
+    async fn pending_sos_sessions(&self) -> Result<Vec<SosSession>, ApiError>;
 }
 
 #[derive(Default)]
@@ -29,6 +45,9 @@ pub struct MemoryRepository {
     incidents: RwLock<HashMap<Uuid, Incident>>,
     responders: RwLock<Vec<VerifiedResponder>>,
     warnings: RwLock<Vec<PublicWarning>>,
+    devices: RwLock<HashMap<Uuid, DeviceRecord>>,
+    vaults: RwLock<HashMap<Uuid, EmergencyVault>>,
+    sos_sessions: RwLock<HashMap<Uuid, SosSession>>,
 }
 
 impl MemoryRepository {
@@ -72,6 +91,9 @@ impl MemoryRepository {
             incidents: RwLock::default(),
             responders: RwLock::new(responders),
             warnings: RwLock::default(),
+            devices: RwLock::default(),
+            vaults: RwLock::default(),
+            sos_sessions: RwLock::default(),
         }
     }
 }
@@ -143,6 +165,62 @@ impl IncidentRepository for MemoryRepository {
     async fn save_warning(&self, warning: PublicWarning) -> Result<(), ApiError> {
         self.warnings.write().unwrap().push(warning);
         Ok(())
+    }
+    async fn register_device(&self, device: DeviceRecord) -> Result<(), ApiError> {
+        self.devices.write().unwrap().insert(device.id, device);
+        Ok(())
+    }
+    async fn device(&self, id: Uuid) -> Result<Option<DeviceRecord>, ApiError> {
+        Ok(self.devices.read().unwrap().get(&id).cloned())
+    }
+    async fn touch_device(&self, id: Uuid) -> Result<(), ApiError> {
+        if let Some(device) = self.devices.write().unwrap().get_mut(&id) {
+            device.last_seen_at = chrono::Utc::now();
+        }
+        Ok(())
+    }
+    async fn save_vault(
+        &self,
+        device_id: Uuid,
+        vault: EmergencyVault,
+    ) -> Result<EmergencyVault, ApiError> {
+        self.vaults
+            .write()
+            .unwrap()
+            .insert(device_id, vault.clone());
+        Ok(vault)
+    }
+    async fn vault(&self, device_id: Uuid) -> Result<Option<EmergencyVault>, ApiError> {
+        Ok(self.vaults.read().unwrap().get(&device_id).cloned())
+    }
+    async fn insert_sos_session(&self, session: SosSession) -> Result<SosSession, ApiError> {
+        self.sos_sessions
+            .write()
+            .unwrap()
+            .insert(session.id, session.clone());
+        Ok(session)
+    }
+    async fn update_sos_session(&self, session: SosSession) -> Result<SosSession, ApiError> {
+        self.sos_sessions
+            .write()
+            .unwrap()
+            .insert(session.id, session.clone());
+        Ok(session)
+    }
+    async fn sos_session(&self, id: Uuid) -> Result<Option<SosSession>, ApiError> {
+        Ok(self.sos_sessions.read().unwrap().get(&id).cloned())
+    }
+    async fn pending_sos_sessions(&self) -> Result<Vec<SosSession>, ApiError> {
+        Ok(self
+            .sos_sessions
+            .read()
+            .unwrap()
+            .values()
+            .filter(|session| {
+                session.status == crate::models::SosSessionStatus::PendingConfirmation
+            })
+            .cloned()
+            .collect())
     }
 }
 
@@ -245,6 +323,91 @@ impl IncidentRepository for PostgresRepository {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+    async fn register_device(&self, device: DeviceRecord) -> Result<(), ApiError> {
+        sqlx::query("INSERT INTO device_registrations (id,token_hash,created_at,last_seen_at) VALUES ($1,$2,$3,$4)")
+            .bind(device.id).bind(device.token_hash).bind(device.created_at).bind(device.last_seen_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+    async fn device(&self, id: Uuid) -> Result<Option<DeviceRecord>, ApiError> {
+        let row: Option<(
+            Uuid,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT id,token_hash,created_at,last_seen_at FROM device_registrations WHERE id=$1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(
+            row.map(|(id, token_hash, created_at, last_seen_at)| DeviceRecord {
+                id,
+                token_hash,
+                created_at,
+                last_seen_at,
+            }),
+        )
+    }
+    async fn touch_device(&self, id: Uuid) -> Result<(), ApiError> {
+        sqlx::query("UPDATE device_registrations SET last_seen_at=NOW() WHERE id=$1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    async fn save_vault(
+        &self,
+        device_id: Uuid,
+        vault: EmergencyVault,
+    ) -> Result<EmergencyVault, ApiError> {
+        let payload = serde_json::to_value(&vault).map_err(|e| ApiError::Storage(e.to_string()))?;
+        sqlx::query("INSERT INTO emergency_vaults (device_id,payload,updated_at) VALUES ($1,$2,$3) ON CONFLICT (device_id) DO UPDATE SET payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at")
+            .bind(device_id).bind(payload).bind(vault.updated_at).execute(&self.pool).await?;
+        Ok(vault)
+    }
+    async fn vault(&self, device_id: Uuid) -> Result<Option<EmergencyVault>, ApiError> {
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT payload FROM emergency_vaults WHERE device_id=$1")
+                .bind(device_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|(payload,)| {
+            serde_json::from_value(payload).map_err(|e| ApiError::Storage(e.to_string()))
+        })
+        .transpose()
+    }
+    async fn insert_sos_session(&self, session: SosSession) -> Result<SosSession, ApiError> {
+        self.update_sos_session(session).await
+    }
+    async fn update_sos_session(&self, session: SosSession) -> Result<SosSession, ApiError> {
+        let payload =
+            serde_json::to_value(&session).map_err(|e| ApiError::Storage(e.to_string()))?;
+        sqlx::query("INSERT INTO sos_sessions (id,device_id,status,payload,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status,payload=EXCLUDED.payload,updated_at=EXCLUDED.updated_at")
+            .bind(session.id).bind(session.device_id).bind(format!("{:?}", session.status).to_lowercase()).bind(payload).bind(session.created_at).bind(session.updated_at).execute(&self.pool).await?;
+        Ok(session)
+    }
+    async fn sos_session(&self, id: Uuid) -> Result<Option<SosSession>, ApiError> {
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT payload FROM sos_sessions WHERE id=$1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|(payload,)| {
+            serde_json::from_value(payload).map_err(|e| ApiError::Storage(e.to_string()))
+        })
+        .transpose()
+    }
+    async fn pending_sos_sessions(&self) -> Result<Vec<SosSession>, ApiError> {
+        let rows: Vec<(serde_json::Value,)> = sqlx::query_as("SELECT payload FROM sos_sessions WHERE status='pendingconfirmation' ORDER BY created_at")
+            .fetch_all(&self.pool).await?;
+        rows.into_iter()
+            .map(|(payload,)| {
+                serde_json::from_value(payload).map_err(|e| ApiError::Storage(e.to_string()))
+            })
+            .collect()
     }
 }
 

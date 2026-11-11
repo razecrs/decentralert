@@ -7,9 +7,10 @@ use axum::{
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
 };
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use futures::{Stream, future::join_all};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
@@ -29,6 +30,16 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/v1/events", get(events))
         .route("/v1/public-warnings", post(create_public_warning))
+        .route("/v1/devices/register", post(register_device))
+        .route("/v1/vault", get(get_vault).put(put_vault))
+        .route("/v1/sos/sessions", post(create_sos_session))
+        .route("/v1/sos/sessions/{id}", get(get_sos_session))
+        .route(
+            "/v1/sos/sessions/{id}/heartbeat",
+            post(heartbeat_sos_session),
+        )
+        .route("/v1/sos/sessions/{id}/confirm", post(confirm_sos_session))
+        .route("/v1/sos/sessions/{id}/cancel", post(cancel_sos_session))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -45,7 +56,15 @@ async fn health() -> Json<serde_json::Value> {
 }
 
 async fn list_incidents(State(state): State<AppState>) -> Result<Json<Vec<Incident>>, ApiError> {
-    Ok(Json(state.repository.list().await?))
+    Ok(Json(
+        state
+            .repository
+            .list()
+            .await?
+            .into_iter()
+            .map(Incident::public_view)
+            .collect(),
+    ))
 }
 async fn get_incident(
     State(state): State<AppState>,
@@ -55,6 +74,7 @@ async fn get_incident(
         .repository
         .get(id)
         .await?
+        .map(Incident::public_view)
         .map(Json)
         .ok_or(ApiError::NotFound)
 }
@@ -62,6 +82,17 @@ async fn get_incident(
 async fn create_incident(
     State(state): State<AppState>,
     Json(request): Json<CreateIncidentRequest>,
+) -> Result<(StatusCode, Json<Incident>), ApiError> {
+    dispatch_incident(&state, request, false, None, 0, false).await
+}
+
+async fn dispatch_incident(
+    state: &AppState,
+    request: CreateIncidentRequest,
+    private_incident: bool,
+    source_session_id: Option<Uuid>,
+    emergency_circle_notified: usize,
+    offline_escalation: bool,
 ) -> Result<(StatusCode, Json<Incident>), ApiError> {
     request
         .validate()
@@ -100,6 +131,10 @@ async fn create_incident(
         sensor_context: request.sensor_context,
         dispatch_attempts: vec![],
         responder_offers: offers,
+        source_session_id,
+        emergency_circle_notified,
+        offline_escalation,
+        private_incident,
         created_at: now,
         updated_at: now,
     };
@@ -140,6 +175,315 @@ async fn create_incident(
     state.repository.update(incident.clone()).await?;
     state.emit(DomainEvent::incident("dispatch.completed", &incident));
     Ok((StatusCode::CREATED, Json(incident)))
+}
+
+async fn register_device(
+    State(state): State<AppState>,
+    Json(_request): Json<DeviceRegistrationRequest>,
+) -> Result<(StatusCode, Json<DeviceRegistration>), ApiError> {
+    let now = Utc::now();
+    let device_id = Uuid::new_v4();
+    let device_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    state
+        .repository
+        .register_device(DeviceRecord {
+            id: device_id,
+            token_hash: hash_token(&device_token),
+            created_at: now,
+            last_seen_at: now,
+        })
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(DeviceRegistration {
+            device_id,
+            device_token,
+        }),
+    ))
+}
+
+async fn get_vault(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<EmergencyVault>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    state
+        .repository
+        .vault(device_id)
+        .await?
+        .map(Json)
+        .ok_or(ApiError::NotFound)
+}
+
+async fn put_vault(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(mut vault): Json<EmergencyVault>,
+) -> Result<Json<EmergencyVault>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    vault
+        .validate()
+        .map_err(|error| ApiError::BadRequest(error.into()))?;
+    vault.updated_at = Utc::now();
+    Ok(Json(state.repository.save_vault(device_id, vault).await?))
+}
+
+async fn create_sos_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSosSessionRequest>,
+) -> Result<(StatusCode, Json<SosSession>), ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    request
+        .location
+        .validate()
+        .map_err(|error| ApiError::BadRequest(error.into()))?;
+    let vault =
+        state.repository.vault(device_id).await?.ok_or_else(|| {
+            ApiError::Conflict("save an emergency vault before starting SOS".into())
+        })?;
+    let now = Utc::now();
+    let session = SosSession {
+        id: Uuid::new_v4(),
+        device_id,
+        status: SosSessionStatus::PendingConfirmation,
+        category: request.category,
+        location: request.location,
+        description: request.description,
+        sensor_context: request.sensor_context,
+        vault_snapshot: Some(vault),
+        notification_attempts: vec![],
+        incident_id: None,
+        confirmation_deadline: now + ChronoDuration::seconds(30),
+        last_heartbeat_at: now,
+        created_at: now,
+        updated_at: now,
+    };
+    let session = state.repository.insert_sos_session(session).await?;
+    emit_safe_session_event(&state, "sos.prealert.created", &session);
+    Ok((StatusCode::CREATED, Json(session)))
+}
+
+async fn get_sos_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SosSession>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    Ok(Json(owned_session(&state, id, device_id).await?))
+}
+
+async fn heartbeat_sos_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(request): Json<HeartbeatRequest>,
+) -> Result<Json<SosSession>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    let mut session = owned_session(&state, id, device_id).await?;
+    if session.status != SosSessionStatus::PendingConfirmation {
+        return Ok(Json(session));
+    }
+    if let Some(location) = request.location {
+        location
+            .validate()
+            .map_err(|error| ApiError::BadRequest(error.into()))?;
+        session.location = location;
+    }
+    if let Some(battery) = request.battery_percent
+        && let Some(context) = session.sensor_context.as_mut()
+    {
+        context.battery_percent = Some(battery);
+    }
+    session.last_heartbeat_at = Utc::now();
+    session.updated_at = Utc::now();
+    Ok(Json(state.repository.update_sos_session(session).await?))
+}
+
+async fn confirm_sos_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SosSession>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    let session = owned_session(&state, id, device_id).await?;
+    Ok(Json(escalate_sos_session(&state, session, false).await?))
+}
+
+async fn cancel_sos_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SosSession>, ApiError> {
+    let device_id = authorize_device(&state, &headers).await?;
+    let mut session = owned_session(&state, id, device_id).await?;
+    if session.status != SosSessionStatus::PendingConfirmation {
+        return Err(ApiError::Conflict("SOS session is already terminal".into()));
+    }
+    session.status = SosSessionStatus::Cancelled;
+    session.vault_snapshot = None;
+    session.notification_attempts.clear();
+    session.updated_at = Utc::now();
+    let session = state.repository.update_sos_session(session).await?;
+    emit_safe_session_event(&state, "sos.prealert.cancelled", &session);
+    Ok(Json(session))
+}
+
+async fn owned_session(
+    state: &AppState,
+    id: Uuid,
+    device_id: Uuid,
+) -> Result<SosSession, ApiError> {
+    let session = state
+        .repository
+        .sos_session(id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if session.device_id != device_id {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(session)
+}
+
+async fn escalate_sos_session(
+    state: &AppState,
+    mut session: SosSession,
+    offline: bool,
+) -> Result<SosSession, ApiError> {
+    if session.status != SosSessionStatus::PendingConfirmation {
+        return Ok(session);
+    }
+    let vault = session
+        .vault_snapshot
+        .clone()
+        .ok_or_else(|| ApiError::Conflict("SOS vault snapshot is unavailable".into()))?;
+    let should_notify = vault.escalation.notify_circle_on_confirm || offline;
+    session.notification_attempts = if should_notify {
+        vault
+            .circle
+            .iter()
+            .filter(|member| member.accepted)
+            .map(|member| CircleNotificationAttempt {
+                member_id: member.id,
+                member_name: member.name.clone(),
+                channels: member.channels.clone(),
+                status: "simulated_notified".into(),
+                attempted_at: Utc::now(),
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+    let profile = if vault.consent.share_medical_profile {
+        vault.profile.clone()
+    } else {
+        EmergencyProfile {
+            display_name: vault.profile.display_name.clone(),
+            ..EmergencyProfile::default()
+        }
+    };
+    let request = CreateIncidentRequest {
+        idempotency_key: format!("sos-session-{}", session.id),
+        category: session.category,
+        location: session.location.clone(),
+        description: session.description.clone(),
+        profile,
+        evidence: vec![],
+        sensor_context: session.sensor_context.clone(),
+    };
+    let (_, Json(incident)) = dispatch_incident(
+        state,
+        request,
+        true,
+        Some(session.id),
+        session.notification_attempts.len(),
+        offline,
+    )
+    .await?;
+    session.incident_id = Some(incident.id);
+    session.status = if offline {
+        SosSessionStatus::EscalatedOffline
+    } else {
+        SosSessionStatus::Confirmed
+    };
+    session.updated_at = Utc::now();
+    let session = state.repository.update_sos_session(session).await?;
+    emit_safe_session_event(
+        state,
+        if offline {
+            "sos.offline.escalated"
+        } else {
+            "sos.confirmed"
+        },
+        &session,
+    );
+    Ok(session)
+}
+
+async fn authorize_device(state: &AppState, headers: &HeaderMap) -> Result<Uuid, ApiError> {
+    let device_id = headers
+        .get("x-device-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or(ApiError::Unauthorized)?;
+    let token = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(ApiError::Unauthorized)?;
+    let device = state
+        .repository
+        .device(device_id)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    if device.token_hash != hash_token(token) {
+        return Err(ApiError::Unauthorized);
+    }
+    state.repository.touch_device(device_id).await?;
+    Ok(device_id)
+}
+
+fn hash_token(token: &str) -> String {
+    hex::encode(Sha256::digest(token.as_bytes()))
+}
+
+fn emit_safe_session_event(state: &AppState, event_type: &str, session: &SosSession) {
+    state.emit(DomainEvent {
+        event_id: Uuid::new_v4(),
+        event_type: event_type.into(),
+        incident_id: session.incident_id,
+        occurred_at: Utc::now(),
+        payload: serde_json::json!({ "sessionId": session.id, "status": session.status, "contactCount": session.notification_attempts.len() }),
+    });
+}
+
+pub async fn sos_watchdog(state: AppState) {
+    let mut interval = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        interval.tick().await;
+        let Ok(sessions) = state.repository.pending_sos_sessions().await else {
+            continue;
+        };
+        for mut session in sessions {
+            let now = Utc::now();
+            let policy = session
+                .vault_snapshot
+                .as_ref()
+                .map(|vault| vault.escalation.clone())
+                .unwrap_or_default();
+            if policy.escalate_when_heartbeat_lost
+                && now - session.last_heartbeat_at
+                    > ChronoDuration::seconds(policy.heartbeat_timeout_seconds as i64)
+            {
+                let _ = escalate_sos_session(&state, session, true).await;
+            } else if now > session.confirmation_deadline + ChronoDuration::minutes(5) {
+                session.status = SosSessionStatus::Cancelled;
+                session.vault_snapshot = None;
+                session.updated_at = now;
+                let _ = state.repository.update_sos_session(session).await;
+            }
+        }
+    }
 }
 
 async fn cancel_incident(
@@ -280,8 +624,10 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode},
     };
+    use chrono::Utc;
     use std::sync::Arc;
     use tower::ServiceExt;
+    use uuid::Uuid;
 
     fn request_json(key: &str) -> String {
         serde_json::json!({ "idempotencyKey": key, "category": "unknown", "location": { "latitude": 52.3728, "longitude": 4.8936, "accuracyMeters": 7.0 }, "description": "Person unresponsive", "profile": { "displayName": "Demo User", "allergies": ["penicillin"], "medications": [], "conditions": [], "accessibilityNeeds": [], "emergencyContacts": [] }, "evidence": [] }).to_string()
@@ -344,5 +690,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(authorized.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn emergency_vault_session_confirms_and_redacts_public_incident() {
+        let router = app(AppState::development(Arc::new(MemoryRepository::seeded())));
+        let registered = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/devices/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"deviceName":"test"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(registered.status(), StatusCode::CREATED);
+        let body = to_bytes(registered.into_body(), usize::MAX).await.unwrap();
+        let registration: crate::models::DeviceRegistration =
+            serde_json::from_slice(&body).unwrap();
+        let auth = format!("Bearer {}", registration.device_token);
+        let vault = serde_json::json!({
+            "profile": { "displayName": "Private Citizen", "allergies": ["penicillin"] },
+            "circle": [{ "id": Uuid::new_v4(), "name": "Trusted person", "phone": "+31000000000", "channels": ["call", "sms"], "accepted": true, "priority": 1 }],
+            "consent": { "sharePreciseLocation": true, "shareMedicalProfile": true, "consentedSnapshots": false, "consentedAudio": false, "consentVersion": "test" },
+            "escalation": { "notifyCircleOnConfirm": true, "escalateWhenHeartbeatLost": false, "heartbeatTimeoutSeconds": 15 },
+            "updatedAt": Utc::now(),
+        }).to_string();
+        let saved = router
+            .clone()
+            .oneshot(
+                Request::put("/v1/vault")
+                    .header("content-type", "application/json")
+                    .header("x-device-id", registration.device_id.to_string())
+                    .header("authorization", auth.clone())
+                    .body(Body::from(vault))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::OK);
+        let session_request = serde_json::json!({ "category": "unknown", "location": { "latitude": 52.37, "longitude": 4.89, "accuracyMeters": 8.0 }, "description": "test SOS" }).to_string();
+        let created = router
+            .clone()
+            .oneshot(
+                Request::post("/v1/sos/sessions")
+                    .header("content-type", "application/json")
+                    .header("x-device-id", registration.device_id.to_string())
+                    .header("authorization", auth.clone())
+                    .body(Body::from(session_request))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let body = to_bytes(created.into_body(), usize::MAX).await.unwrap();
+        let session: crate::models::SosSession = serde_json::from_slice(&body).unwrap();
+        let confirmed = router
+            .clone()
+            .oneshot(
+                Request::post(format!("/v1/sos/sessions/{}/confirm", session.id))
+                    .header("content-type", "application/json")
+                    .header("x-device-id", registration.device_id.to_string())
+                    .header("authorization", auth)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        let body = to_bytes(confirmed.into_body(), usize::MAX).await.unwrap();
+        let confirmed_session: crate::models::SosSession = serde_json::from_slice(&body).unwrap();
+        assert_eq!(confirmed_session.notification_attempts.len(), 1);
+        let incident_id = confirmed_session.incident_id.unwrap();
+        let public = router
+            .oneshot(
+                Request::get(format!("/v1/incidents/{incident_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(public.into_body(), usize::MAX).await.unwrap();
+        let incident: crate::models::Incident = serde_json::from_slice(&body).unwrap();
+        assert_eq!(incident.profile.display_name, "Protected citizen");
+        assert_eq!(incident.emergency_circle_notified, 1);
     }
 }

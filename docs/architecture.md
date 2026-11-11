@@ -6,14 +6,16 @@ Decentralert coordinates information; it is not itself an emergency control room
 
 ## Incident flow
 
-1. The shared `SosCoordinator` starts a visible 30-second countdown.
-2. Platform code obtains permissioned location, recent sensor context, and sequential front/rear snapshots only while the SOS screen is active.
-3. Cancellation deletes pending media. `Send now` or timeout submits one idempotent incident.
-4. The Rust API persists the incident before fan-out.
-5. Every required configured service adapter receives the same incident ID in parallel.
-6. PostGIS ranks available verified responders; only an approximate area is included in the initial offer.
-7. Service acknowledgements and responder acceptance update the incident timeline and SSE stream.
-8. Operators may close incidents. Only an authenticated operator can issue a public warning.
+1. The user creates an Emergency Vault containing a profile, consent choices, and accepted Emergency Circle contacts.
+2. The Android client registers a device, synchronizes the vault, obtains permissioned location, and persists an authenticated SOS pre-alert before the countdown begins.
+3. The shared `SosCoordinator` starts a visible 30-second countdown while the client sends periodic heartbeats.
+4. Cancellation removes sensitive pending context. `Send now` or timeout confirms the session. If the user opted in, a heartbeat timeout can confirm it as an offline escalation.
+5. The Rust API creates a private incident and records simulated notification attempts for accepted Circle contacts.
+6. Every required configured service adapter receives the same incident ID in parallel.
+7. PostGIS ranks available verified responders; only an approximate area is included in the initial offer.
+8. Public incident reads redact the medical profile, evidence, and sensor context for device-originated private incidents.
+9. Service acknowledgements and responder acceptance update the incident timeline and SSE stream.
+10. Operators may close incidents. Only an authenticated operator can issue a public warning.
 
 ## Components
 
@@ -23,7 +25,7 @@ The `shared` module owns wire models, emergency profile types, consent boundarie
 
 ### Mobile
 
-The Android shell demonstrates countdown and category flow. A production client must add CameraX/AVFoundation capture adapters, encrypted local staging, platform keystore integration, background-location justification, notification channels, and accessibility testing. The project is opt-in (`-PenableAndroid=true`) so web/shared builds remain usable without an Android SDK.
+The Android app demonstrates profile editing, consent, Emergency Circle setup, authenticated vault synchronization, SOS pre-alerts, countdown heartbeats, cancellation, and confirmation. It encrypts the local vault and device credential with an app-specific Android Keystore key. Disabling precise-location consent rounds coordinates before upload. A production client must add CameraX/AVFoundation capture adapters, hardware-backed key policy, background-location justification, real notification providers, and accessibility testing. The project is opt-in (`-PenableAndroid=true`) so web/shared builds remain usable without an Android SDK.
 
 ### Dashboard
 
@@ -31,7 +33,7 @@ The Kotlin/Wasm console polls the incident endpoint while the backend also expos
 
 ### Rust API
 
-Axum serves the HTTP API. Development mode uses an in-memory store seeded with verified responders. Setting `DATABASE_URL` enables PostgreSQL/PostGIS and runs migrations. The repository boundary permits a durable outbox/NATS implementation without changing API handlers.
+Axum serves the HTTP API. Development mode uses an in-memory store seeded with verified responders. Setting `DATABASE_URL` enables PostgreSQL/PostGIS and runs migrations. A watchdog evaluates opted-in pending sessions for heartbeat loss. The repository boundary permits a durable outbox/NATS implementation without changing API handlers.
 
 ## Production hardening still required
 

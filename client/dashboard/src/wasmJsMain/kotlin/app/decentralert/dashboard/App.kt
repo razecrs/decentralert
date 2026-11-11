@@ -169,7 +169,7 @@ private fun IncidentCard(incident: Incident, selected: Boolean, onClick: () -> U
             Spacer(Modifier.weight(1f)); Text(incident.status.name.replace('_', ' '), color = TextMuted, fontSize = 10.sp)
         }
         Spacer(Modifier.height(8.dp)); Text(incident.description ?: "No description", color = TextPrimary, fontWeight = FontWeight.SemiBold, maxLines = 2)
-        Spacer(Modifier.height(9.dp)); Text("${incident.dispatchAttempts.size} services · ${incident.responderOffers.size} responders", color = TextMuted, fontSize = 11.sp)
+        Spacer(Modifier.height(9.dp)); Text("${incident.dispatchAttempts.size} services · ${incident.responderOffers.size} responders · ${incident.emergencyCircleNotified} circle", color = TextMuted, fontSize = 11.sp)
     }
 }
 
@@ -211,6 +211,11 @@ private fun IncidentDetails(incident: Incident?, modifier: Modifier) {
         DetailRow("Conditions", incident.profile.conditions.ifEmpty { listOf("None reported") }.joinToString())
         Spacer(Modifier.height(18.dp)); SectionLabel("SERVICE FAN-OUT")
         incident.dispatchAttempts.forEach { attempt -> DetailRow(attempt.service.replaceFirstChar { it.uppercase() }, attempt.status.replace('_', ' '), if (attempt.status == "acknowledged") Mint else Amber) }
+        if (incident.emergencyCircleNotified > 0 || incident.offlineEscalation) {
+            Spacer(Modifier.height(18.dp)); SectionLabel("EMERGENCY HANDOFF")
+            DetailRow("Circle", "${incident.emergencyCircleNotified} notified", Mint)
+            DetailRow("Trigger", if (incident.offlineEscalation) "heartbeat lost" else "user confirmed", if (incident.offlineEscalation) Amber else TextPrimary)
+        }
         Spacer(Modifier.height(18.dp)); SectionLabel("NEARBY RESPONSE")
         incident.responderOffers.take(3).forEach { offer -> DetailRow(offer.displayName, "${offer.distanceMeters} m · ${offer.estimatedArrivalSeconds / 60 + 1} min") }
         Spacer(Modifier.weight(1f)); Text("SIMULATION ONLY · NOT CONNECTED TO 112", color = Danger, fontWeight = FontWeight.Bold, fontSize = 11.sp)

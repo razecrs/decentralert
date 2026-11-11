@@ -31,6 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let state = AppState::development(repository);
+    tokio::spawn(decentralert_backend::api::sos_watchdog(state.clone()));
     let app = app(state)
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::new(

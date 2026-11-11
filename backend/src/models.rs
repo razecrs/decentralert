@@ -199,6 +199,205 @@ pub struct Incident {
     pub sensor_context: Option<SensorContext>,
     pub dispatch_attempts: Vec<DispatchAttempt>,
     pub responder_offers: Vec<ResponderOffer>,
+    #[serde(default)]
+    pub source_session_id: Option<Uuid>,
+    #[serde(default)]
+    pub emergency_circle_notified: usize,
+    #[serde(default)]
+    pub offline_escalation: bool,
+    #[serde(default)]
+    pub private_incident: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Incident {
+    pub fn public_view(mut self) -> Self {
+        if self.private_incident {
+            self.profile = EmergencyProfile {
+                display_name: "Protected citizen".into(),
+                ..EmergencyProfile::default()
+            };
+            self.evidence.clear();
+            self.sensor_context = None;
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRecord {
+    pub id: Uuid,
+    pub token_hash: String,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRegistrationRequest {
+    pub device_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceRegistration {
+    pub device_id: Uuid,
+    pub device_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationChannel {
+    Call,
+    Sms,
+    Push,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CircleMember {
+    pub id: Uuid,
+    pub name: String,
+    pub phone: String,
+    pub relationship: Option<String>,
+    #[serde(default)]
+    pub channels: Vec<NotificationChannel>,
+    #[serde(default)]
+    pub accepted: bool,
+    #[serde(default)]
+    pub priority: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultConsent {
+    pub share_precise_location: bool,
+    pub share_medical_profile: bool,
+    pub consented_snapshots: bool,
+    pub consented_audio: bool,
+    pub consent_version: String,
+}
+
+impl Default for VaultConsent {
+    fn default() -> Self {
+        Self {
+            share_precise_location: true,
+            share_medical_profile: true,
+            consented_snapshots: false,
+            consented_audio: false,
+            consent_version: "2026-11-prototype".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EscalationPolicy {
+    pub notify_circle_on_confirm: bool,
+    pub escalate_when_heartbeat_lost: bool,
+    pub heartbeat_timeout_seconds: u32,
+}
+
+impl Default for EscalationPolicy {
+    fn default() -> Self {
+        Self {
+            notify_circle_on_confirm: true,
+            escalate_when_heartbeat_lost: false,
+            heartbeat_timeout_seconds: 15,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmergencyVault {
+    pub profile: EmergencyProfile,
+    #[serde(default)]
+    pub circle: Vec<CircleMember>,
+    #[serde(default)]
+    pub consent: VaultConsent,
+    #[serde(default)]
+    pub escalation: EscalationPolicy,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl EmergencyVault {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.profile.display_name.trim().is_empty() {
+            return Err("profile.displayName is required");
+        }
+        if self.profile.display_name.len() > 120 || self.circle.len() > 12 {
+            return Err("profile name or emergency circle is too large");
+        }
+        if !(10..=120).contains(&self.escalation.heartbeat_timeout_seconds) {
+            return Err("heartbeatTimeoutSeconds must be between 10 and 120");
+        }
+        for member in &self.circle {
+            if member.name.trim().is_empty()
+                || member.phone.trim().is_empty()
+                || member.name.len() > 120
+                || member.phone.len() > 40
+            {
+                return Err("every circle member requires a valid name and phone number");
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SosSessionStatus {
+    PendingConfirmation,
+    Confirmed,
+    EscalatedOffline,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateSosSessionRequest {
+    pub category: EmergencyCategory,
+    pub location: GeoPoint,
+    pub description: Option<String>,
+    pub sensor_context: Option<SensorContext>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HeartbeatRequest {
+    pub location: Option<GeoPoint>,
+    pub battery_percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CircleNotificationAttempt {
+    pub member_id: Uuid,
+    pub member_name: String,
+    pub channels: Vec<NotificationChannel>,
+    pub status: String,
+    pub attempted_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SosSession {
+    pub id: Uuid,
+    pub device_id: Uuid,
+    pub status: SosSessionStatus,
+    pub category: EmergencyCategory,
+    pub location: GeoPoint,
+    pub description: Option<String>,
+    pub sensor_context: Option<SensorContext>,
+    pub vault_snapshot: Option<EmergencyVault>,
+    #[serde(default)]
+    pub notification_attempts: Vec<CircleNotificationAttempt>,
+    pub incident_id: Option<Uuid>,
+    pub confirmation_deadline: DateTime<Utc>,
+    pub last_heartbeat_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
